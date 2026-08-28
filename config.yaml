@@ -1,0 +1,36 @@
+# 全局路径配置
+# 所有路径均以项目根目录为基准
+
+project:
+  root: "."                      # 项目根目录（相对路径基准）
+
+# ---------- 数据 ----------
+data:
+  raw: "data/raw"                # 原始附件数据目录
+  raw_files:                     # 各附件文件
+    f1: "data/raw/附件1.xlsx"
+    f2: "data/raw/附件2.xlsx"
+    f3: "data/raw/附件3.xlsx"
+    f4: "data/raw/附件4.xlsx"
+
+# ---------- 主代码（模型求解）----------
+model:
+  code: "src/model"              # 主代码目录
+
+# ---------- 生图代码 ----------
+visualize:
+  code: "src/visualize"          # 生图代码目录
+  output: "outputs/figures"      # 图片输出目录
+
+# ---------- 输出 ----------
+outputs:
+  figures: "outputs/figures"     # 输出图片
+  reports: "outputs/reports"     # 各题完整过程报告
+  report_files:                  # 各题报告文件
+    q1: "outputs/reports/q1.md"
+    q2: "outputs/reports/q2.md"
+    q3: "outputs/reports/q3.md"
+
+# ---------- 结果数据 ----------
+result:
+  dir: "result"                  # 数据结果存放目录

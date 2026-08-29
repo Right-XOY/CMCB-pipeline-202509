@@ -39,15 +39,18 @@ PREPROC = dict(
 BOUNDS = {
     "cauchy": [(0.5, 200.0), (1.5, 3.5), (-1.0, 1.0), (-1.0, 1.0)],
     "sellmeier": [(0.5, 200.0), (0.0, 3.0), (0.1, 2000.0), (0.0, 3.0), (0.1, 2000.0)],
+    "sellmeier1": [(0.5, 200.0), (0.0, 8.0), (0.0, 1.0)],
 }
 # DE 初值搜索只针对色散系数
 DE_BOUNDS = {
     "cauchy": [(1.5, 3.5), (-1.0, 1.0), (-1.0, 1.0)],
     "sellmeier": [(0.0, 3.0), (0.1, 2000.0), (0.0, 3.0), (0.1, 2000.0)],
+    "sellmeier1": [(0.0, 8.0), (0.0, 1.0)],
 }
 PARAM_NAMES = {
     "cauchy": ["d(μm)", "A", "B", "C"],
     "sellmeier": ["d(μm)", "B1", "C1", "B2", "C2"],
+    "sellmeier1": ["d(μm)", "B", "C"],
 }
 SEED = 2025
 
@@ -74,27 +77,29 @@ def save_json(path: Path, data: dict) -> None:
     print(f"  [输出] {path.name}")
 
 
-def solve_model(wn1, R1, wn2, R2, d0, model: str) -> tuple[dict, object]:
+def solve_model(wn1, R1, wn2, R2, d0, model: str, fix_d: bool = True) -> tuple[dict, object]:
     """对单个模型执行 DE 初值 → L-M 拟合 → 可靠性统计。
 
     返回 (可序列化摘要 dict, FitResult 拟合对象)。
     线性参数 (a, b) 每个角度独立、闭式消元，不进优化器。
+    fix_d=True：厚度由 FFT 固定（d0），只优化色散系数，避免周期分支跳变。
     """
-    # 1) DE 初值（色散系数）
+    # 1) DE 初值（色散系数，厚度固定 d0）
     beta0 = de_init_beta(wn1, R1, wn2, R2, d0, model, N2, ANGLES,
                          DE_BOUNDS[model], seed=SEED)
 
-    # 2) L-M 联合拟合
+    # 2) L-M 拟合
     fit = lm_fit(wn1, R1, wn2, R2, d0, beta0, model, N2, ANGLES,
-                 BOUNDS[model], seed=SEED)
+                 BOUNDS[model], seed=SEED, fix_d=fix_d)
 
-    # 3) 拟合优度统计（自由度计入线性参数）
-    stats = fit_statistics(fit.res, fit.n_params + fit.n_lin, R1, R2)
+    # 3) 拟合优度统计（自由度 = 优化变量数 + 线性参数数）
+    stats = fit_statistics(fit.res, fit.res.x.size + fit.n_lin, R1, R2)
 
-    # 4) 参数不确定性（协方差 → 置信区间）
-    sd, ci, _ = parameter_uncertainty(fit.res, PARAM_NAMES[model], n_lin=fit.n_lin)
+    # 4) 参数不确定性（协方差 → 置信区间；fix_d 时 d 固定无不确定度）
+    pnames = PARAM_NAMES[model] if not fix_d else PARAM_NAMES[model][1:]
+    sd, ci, _ = parameter_uncertainty(fit.res, pnames, n_lin=fit.n_lin)
 
-    # 5) 双角度一致性交叉验证
+    # 5) 双角度一致性交叉验证（独立自由拟合，仅用于检验）
     cross = single_angle_cross_check(wn1, R1, wn2, R2, d0, beta0, model,
                                      N2, ANGLES, BOUNDS[model], seed=SEED)
 
@@ -107,10 +112,12 @@ def solve_model(wn1, R1, wn2, R2, d0, model: str) -> tuple[dict, object]:
         "linear": linear,
         "param_sd": sd.tolist(),
         "param_ci": ci.tolist(),
+        "param_names": pnames,
         "stats": stats,
         "cross_check": cross,
         "beta0": beta0.tolist(),
         "d0": d0,
+        "fix_d": bool(fix_d),
     }
     return summary, fit
 
@@ -152,43 +159,43 @@ def main() -> None:
     # 3. 两模型求解
     print("\n[3] 模型求解（DE 初值 + L-M 联合拟合）")
     results = {}
-    for model in ["cauchy", "sellmeier"]:
+    for model in ["cauchy", "sellmeier1"]:
         print(f"  --- 模型: {model} ---")
         results[model], fit = solve_model(wn1, R1, wn2, R2, d0, model)
         r = results[model]
         lin = r["linear"]
-        print(f"    d = {r['d']:.4f} um   RMSE = {r['stats']['RMSE']:.4f}   "
+        print(f"    d = {r['d']:.4f} um (FFT固定)   RMSE = {r['stats']['RMSE']:.4f}   "
               f"R^2 = {r['stats']['R2']:.4f}")
         print(f"    线性校正 10deg: a={lin['angle10']['a']:.4f} b={lin['angle10']['b']:.4f}  |  "
               f"15deg: a={lin['angle15']['a']:.4f} b={lin['angle15']['b']:.4f}")
-        print(f"    d 95%CI: [{r['param_ci'][0][0]:.4f}, {r['param_ci'][0][1]:.4f}]")
-        print(f"    单角度独立拟合: 10deg -> {r['cross_check']['d_angle1']:.4f} um, "
+        print(f"    单角度独立拟合(自由d): 10deg -> {r['cross_check']['d_angle1']:.4f} um, "
               f"15deg -> {r['cross_check']['d_angle2']:.4f} um")
         # 拟合曲线落盘（供生图阶段直接读取）
         save_csv(result_dir / f"q2_fit_{model}.csv",
                  "wn1,R_obs1,R_fit1,wn2,R_obs2,R_fit2",
                  [wn1, R1, fit.fit1, wn2, R2, fit.fit2])
-        # 参数表落盘
+        # 参数表落盘（fix_d 时 d 固定，sd=0、CI=[d,d]）
         names = PARAM_NAMES[model]
-        vals = np.asarray(r["theta"], float)
-        sd = np.asarray(r["param_sd"], float)
-        ci = np.asarray(r["param_ci"], float)
+        theta_full = np.concatenate([[r["d"]], np.asarray(r["beta"], float)])
+        sd_full = np.concatenate([[0.0], np.asarray(r["param_sd"], float)])
+        ci_lo = np.concatenate([[r["d"]], np.asarray(r["param_ci"], float)[:, 0]])
+        ci_hi = np.concatenate([[r["d"]], np.asarray(r["param_ci"], float)[:, 1]])
         param_csv = np.column_stack([np.array(names, dtype=object),
-                                     np.round(vals, 6), np.round(sd, 6),
-                                     np.round(ci[:, 0], 6), np.round(ci[:, 1], 6)])
+                                     np.round(theta_full, 6), np.round(sd_full, 6),
+                                     np.round(ci_lo, 6), np.round(ci_hi, 6)])
         np.savetxt(result_dir / f"q2_parameters_{model}.csv", param_csv,
                    fmt="%s", delimiter=",",
                    header="param,value,sd,ci_lo,ci_hi", comments="")
         print(f"  [输出] q2_parameters_{model}.csv")
 
-    # 4. 抗噪声能力测试
-    print("\n[4] 抗噪声能力测试")
+    # 4. 抗噪声能力测试（全局：每次加噪后重新走完整反演）
+    print("\n[4] 抗噪声能力测试（全局反演，含 DE，较慢）")
     noise = {}
-    for model in ["cauchy", "sellmeier"]:
-        r = results[model]
+    for model in ["cauchy", "sellmeier1"]:
         noise[model] = noise_robustness_test(
-            wn1, R1, wn2, R2, r["d"], r["beta"], model, N2, ANGLES,
-            BOUNDS[model], levels=(0.01, 0.02, 0.05), nrep=5, seed=SEED)
+            wn1, R1, wn2, R2, model, N2, ANGLES,
+            BOUNDS[model], DE_BOUNDS[model],
+            levels=(0.01, 0.02, 0.05), nrep=5, seed=SEED)
         for eta, v in noise[model].items():
             print(f"  {model} eta={eta}: d = {v['d_mean']:.4f} +/- {v['d_std']:.4f} um")
     save_json(result_dir / "q2_noise_test.json", noise)
@@ -203,17 +210,17 @@ def main() -> None:
     print("\n" + "=" * 60)
     print("两模型结果对比")
     print("=" * 60)
-    print(f"{'指标':<10}{'Cauchy':>14}{'Sellmeier':>14}")
+    print(f"{'指标':<10}{'Cauchy':>14}{'Sellmeier1':>14}")
     for key, label in [("d", "d (um)"),
                        ("RMSE", "RMSE"), ("R2", "R^2"),
                        ("AIC", "AIC"), ("BIC", "BIC")]:
         if key in ("RMSE", "R2", "AIC", "BIC"):
             row = f"{label:<10}"
-            for m in ["cauchy", "sellmeier"]:
+            for m in ["cauchy", "sellmeier1"]:
                 row += f"{results[m]['stats'][key]:>14.4f}"
         else:
             row = f"{label:<10}"
-            for m in ["cauchy", "sellmeier"]:
+            for m in ["cauchy", "sellmeier1"]:
                 row += f"{results[m][key]:>14.4f}"
         print(row)
     print("\n完成。结果已写入 outputs/result/ 目录。")

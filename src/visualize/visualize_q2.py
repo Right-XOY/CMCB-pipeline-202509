@@ -1,5 +1,4 @@
-# -*- coding: utf-8 -*-
-"""问题二生图脚本：生成论文所需的 7 张数据驱动图（PNG，彩色，中文标签）。
+"""问题二生图脚本：生成论文所需的 15 张数据驱动图（PNG，彩色，中文标签）。
 
 运行方式（在项目根目录）：
     python src/visualize/visualize_q2.py
@@ -7,14 +6,14 @@
 数据来源：
   - 原始光谱：data/raw/附件1.xlsx、附件2.xlsx（复用 src/model/preprocess.load_spectra）
   - 预处理结果：outputs/result/q2_processed_f1/f2.csv（主代码 q2.py 输出）
-  - 拟合结果：outputs/result/q2_fit_cauchy/sellmeier.csv
+  - 拟合结果：outputs/result/q2_fit_cauchy/sellmeier1.csv
   - 可靠性结果：outputs/result/q2_results.json、q2_noise_test.json
 
 输出：outputs/figures/q2/q2_fig01_raw_f1/f2.png、q2_fig02_cropped_f1/f2.png、
-      q2_fig03_prepost_f1/f2.png、q2_fig04_fit_cauchy.png、q2_fig05_fit_sellmeier.png、
-      q2_fig06_residuals_cauchy/sellmeier.png、q2_fig07_reliability.png、
-      q2_fig08_cross_check.png、q2_fig09_residual_fft_cauchy/sellmeier.png、
-      q2_fig10_dispersion.png、q2_fig11_residual_norm_cauchy/sellmeier.png
+      q2_fig03_prepost_f1/f2.png、q2_fig04_fit_cauchy.png、q2_fig05_fit_sellmeier1.png、
+      q2_fig06_residuals_cauchy/sellmeier1.png、q2_fig07_reliability.png、
+      q2_fig08_cross_check.png、q2_fig09_residual_fft_cauchy/sellmeier1.png、
+      q2_fig10_dispersion.png、q2_fig11_residual_hist/qq_cauchy/sellmeier1.png
 """
 from __future__ import annotations
 
@@ -32,7 +31,7 @@ ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT / "src" / "model"))
 from preprocess import find_cutoff_stft, load_spectra, resample  # noqa: E402
 from scipy.stats import norm, probplot  # noqa: E402
-from models import n_cauchy, n_sellmeier  # noqa: E402
+from models import n_cauchy, n_sellmeier1  # noqa: E402
 
 # matplotlib 全局样式：PNG + 彩色 + 中文
 plt.rcParams.update({
@@ -133,8 +132,8 @@ def fig_fit(out_dir: Path, result_dir: Path, model: str,
     data = np.loadtxt(result_dir / f"q2_fit_{model}.csv",
                       delimiter=",", skiprows=1)
     w1, _, f1_, w2, _, f2_ = data.T
-    name = "Cauchy" if model == "cauchy" else "Sellmeier"
-    tag = "q2_fig04_fit_cauchy.png" if model == "cauchy" else "q2_fig05_fit_sellmeier.png"
+    name = {"cauchy": "Cauchy", "sellmeier1": "Sellmeier"}[model]
+    tag = f"q2_fig0{'4' if model == 'cauchy' else '5'}_fit_{model}.png"
     fig, axes = plt.subplots(2, 1, figsize=(8, 6.2), sharex=True)
     panels = [(axes[0], w1, wn1, R1, f1_, p1, C_F1, "10°"),
               (axes[1], w2, wn2, R2, f2_, p2, C_F2, "15°")]
@@ -145,8 +144,8 @@ def fig_fit(out_dir: Path, result_dir: Path, model: str,
         Rc = np.interp(wfit, wnc, Rc)
         # 模型曲线：AsLS 基线 + 拟合振荡 + DC 偏移（重建原始反射率口径）
         Rmodel = p[:, 2] + ffit + p[:, 3]
-        ax.plot(wfit, Rc, color=color, lw=0.7, alpha=0.55, label="实测（原始）")
-        ax.plot(wfit, Rmodel, color="k", lw=1.2, label="模型拟合")
+        ax.plot(wfit, Rc, color=color, lw=0.7, alpha=0.8, label="实测（原始）")
+        ax.plot(wfit, Rmodel, color="k", lw=1.0, alpha=0.6, label="模型拟合")
         ax.set_ylabel("反射率（%）")
         ax.set_title(f"入射角 {angle}：{name} 模型拟合（原始反射率口径）")
         ax.legend(loc="lower right")
@@ -159,7 +158,7 @@ def fig_fit(out_dir: Path, result_dir: Path, model: str,
 
 # 图6：残差分布（每个模型一张图，含两角度子图）
 def fig06_residuals(out_dir: Path, result_dir: Path) -> None:
-    for model, name in [("cauchy", "Cauchy"), ("sellmeier", "Sellmeier")]:
+    for model, name in [("cauchy", "Cauchy"), ("sellmeier1", "Sellmeier")]:
         d = np.loadtxt(result_dir / f"q2_fit_{model}.csv",
                        delimiter=",", skiprows=1)
         wn1, o1, f1_, wn2, o2, f2_ = d.T
@@ -189,7 +188,7 @@ def fig07_reliability(out_dir: Path, result_dir: Path) -> None:
     with open(result_dir / "q2_noise_test.json", encoding="utf-8") as f:
         noise = json.load(f)
 
-    models = ["cauchy", "sellmeier"]
+    models = ["cauchy", "sellmeier1"]
     names = ["Cauchy", "Sellmeier"]
     colors = [C_CAU, C_SEL]
 
@@ -216,7 +215,7 @@ def fig07_reliability(out_dir: Path, result_dir: Path) -> None:
 def fig08_cross_check(out_dir: Path, result_dir: Path) -> None:
     with open(result_dir / "q2_results.json", encoding="utf-8") as f:
         res = json.load(f)
-    models = ["cauchy", "sellmeier"]
+    models = ["cauchy", "sellmeier1"]
     names = ["Cauchy", "Sellmeier"]
     colors = [C_CAU, C_SEL]
     labels = ["联合拟合", "单角度 10°", "单角度 15°"]
@@ -245,7 +244,7 @@ def fig08_cross_check(out_dir: Path, result_dir: Path) -> None:
 
 # 图9：残差频谱（残差是否仍含周期结构 → 多光束干涉伏笔）
 def fig09_residual_fft(out_dir: Path, result_dir: Path) -> None:
-    for model, name in [("cauchy", "Cauchy"), ("sellmeier", "Sellmeier")]:
+    for model, name in [("cauchy", "Cauchy"), ("sellmeier1", "Sellmeier")]:
         d = np.loadtxt(result_dir / f"q2_fit_{model}.csv",
                        delimiter=",", skiprows=1)
         wn1, o1, f1_, wn2, o2, f2_ = d.T
@@ -285,7 +284,7 @@ def fig10_dispersion(out_dir: Path, result_dir: Path) -> None:
     nu = np.linspace(1550.0, 4000.0, 400)   # cm⁻¹
     lam = 1e4 / nu                          # μm
     n_c = n_cauchy(nu, *res["models"]["cauchy"]["beta"])
-    n_s = n_sellmeier(nu, *res["models"]["sellmeier"]["beta"])
+    n_s = n_sellmeier1(nu, *res["models"]["sellmeier1"]["beta"])
     fig, ax = plt.subplots(figsize=(8, 4.5))
     ax.plot(lam, n_c, color=C_CAU, lw=1.6, label="Cauchy")
     ax.plot(lam, n_s, color=C_SEL, lw=1.6, label="Sellmeier")
@@ -299,32 +298,41 @@ def fig10_dispersion(out_dir: Path, result_dir: Path) -> None:
     print("save -> %s/q2_fig10_dispersion.png" % out_dir.name)
 
 
-# 图11：残差正态性检验（直方图 + 正态 QQ 图）
+# 图11：残差正态性检验（直方图与 QQ 图分别成图，各两角度子图）
 def fig11_residual_norm(out_dir: Path, result_dir: Path) -> None:
-    for model, name in [("cauchy", "Cauchy"), ("sellmeier", "Sellmeier")]:
+    for model, name in [("cauchy", "Cauchy"), ("sellmeier1", "Sellmeier")]:
         d = np.loadtxt(result_dir / f"q2_fit_{model}.csv",
                        delimiter=",", skiprows=1)
         wn1, o1, f1_, wn2, o2, f2_ = d.T
-        fig, axes = plt.subplots(2, 2, figsize=(9.5, 7))
-        panels = [(axes[0, 0], axes[0, 1], o1 - f1_, C_F1, "10°"),
-                  (axes[1, 0], axes[1, 1], o2 - f2_, C_F2, "15°")]
-        for axh, axq, res, color, angle in panels:
+        panels = [(o1 - f1_, C_F1, "10°"), (o2 - f2_, C_F2, "15°")]
+
+        # 直方图
+        fig, axes = plt.subplots(1, 2, figsize=(9.5, 3.8))
+        for ax, (res, color, angle) in zip(axes, panels):
             mu, sigma = float(np.mean(res)), float(np.std(res))
-            axh.hist(res, bins=60, density=True, alpha=0.6, color=color)
+            ax.hist(res, bins=60, density=True, alpha=0.6, color=color)
             xg = np.linspace(float(res.min()), float(res.max()), 200)
-            axh.plot(xg, norm.pdf(xg, mu, sigma), "k", lw=1.3, label="正态拟合")
-            axh.set_title(f"{name} 残差直方图：入射角 {angle}")
-            axh.set_xlabel("残差（%）")
-            axh.set_ylabel("密度")
-            axh.legend(loc="best")
-            probplot(res, dist="norm", plot=axq)
-            axq.set_title(f"{name} 正态 QQ 图：入射角 {angle}")
-            axq.set_xlabel("理论分位数")
-            axq.set_ylabel("样本分位数")
+            ax.plot(xg, norm.pdf(xg, mu, sigma), "k", lw=1.3, label="正态拟合")
+            ax.set_title(f"{name} 残差直方图：入射角 {angle}")
+            ax.set_xlabel("残差（%）")
+            ax.set_ylabel("密度")
+            ax.legend(loc="best")
         fig.tight_layout()
-        fig.savefig(out_dir / f"q2_fig11_residual_norm_{model}.png")
+        fig.savefig(out_dir / f"q2_fig11_residual_hist_{model}.png")
         plt.close(fig)
-        print("save -> %s/q2_fig11_residual_norm_%s.png" % (out_dir.name, model))
+        print("save -> %s/q2_fig11_residual_hist_%s.png" % (out_dir.name, model))
+
+        # QQ 图
+        fig, axes = plt.subplots(1, 2, figsize=(9.5, 3.8))
+        for ax, (res, _color, angle) in zip(axes, panels):
+            probplot(res, dist="norm", plot=ax)
+            ax.set_title(f"{name} 正态 QQ 图：入射角 {angle}")
+            ax.set_xlabel("理论分位数")
+            ax.set_ylabel("样本分位数")
+        fig.tight_layout()
+        fig.savefig(out_dir / f"q2_fig11_residual_qq_{model}.png")
+        plt.close(fig)
+        print("save -> %s/q2_fig11_residual_qq_%s.png" % (out_dir.name, model))
 
 
 def main() -> None:
@@ -350,7 +358,7 @@ def main() -> None:
     fig02_crop(out_dir, wn1, R1, wn2, R2)
     fig03_prepost(out_dir, wn1, R1, wn2, R2, p1, p2)
     fig_fit(out_dir, result_dir, "cauchy", wn1, R1, wn2, R2, p1, p2)
-    fig_fit(out_dir, result_dir, "sellmeier", wn1, R1, wn2, R2, p1, p2)
+    fig_fit(out_dir, result_dir, "sellmeier1", wn1, R1, wn2, R2, p1, p2)
     fig06_residuals(out_dir, result_dir)
     fig07_reliability(out_dir, result_dir)
     fig08_cross_check(out_dir, result_dir)
@@ -358,7 +366,7 @@ def main() -> None:
     fig10_dispersion(out_dir, result_dir)
     fig11_residual_norm(out_dir, result_dir)
 
-    print("完成。15 张图已输出到 outputs/figures/q2/。")
+    print("完成。19 张图已输出到 outputs/figures/q2/。")
 
 
 if __name__ == "__main__":

@@ -95,19 +95,27 @@ def de_init_beta(wn1, R1, wn2, R2, d0: float, model: str, n2: float,
 
 # L-M 非线性最小二乘拟合（线性参数 a,b 每角度闭式消元）
 def lm_fit(wn1, R1, wn2, R2, d0: float, beta0: np.ndarray, model: str, n2: float,
-           angles, bounds, seed: int = 0) -> FitResult:
+           angles, bounds, seed: int = 0, fix_d: bool = False) -> FitResult:
     """L-M 双角度联合拟合（若 R2 为 None 则仅拟合角度 1）。
 
-    优化变量 θ = [d, 色散系数...]。每个角度独立引入线性校正
+    fix_d=True：厚度固定为 d0（由 FFT 提供），仅优化色散系数——
+    避免多周期分支目标函数把 d 带到错误分支。
+
+    优化变量 θ = [d(可选), 色散系数...]。每个角度独立引入线性校正
     R_obs,i ≈ a_i·T_i + b_i（a 增益、b DC 偏移），(a_i, b_i) 不进优化器，
     每次残差评估时由线性最小二乘闭式求解（profile 消元）。
     """
-    theta0 = np.r_[d0, np.asarray(beta0, float)]
     use2 = R2 is not None
+    if fix_d:
+        theta0 = np.asarray(beta0, float)
+    else:
+        theta0 = np.r_[d0, np.asarray(beta0, float)]
 
     def residuals(th):
-        d = th[0]
-        beta = th[1:]
+        if fix_d:
+            d, beta = d0, th
+        else:
+            d, beta = th[0], th[1:]
         T1 = theory_R(wn1, d, beta, angles[0], n2, model)
         a1, b1 = _lin_solve(T1, R1)
         e1 = a1 * T1 + b1 - R1
@@ -119,13 +127,18 @@ def lm_fit(wn1, R1, wn2, R2, d0: float, beta0: np.ndarray, model: str, n2: float
         return np.concatenate([e1, e2])
 
     # bounds: list[(lo, hi)] -> (lb, ub) 两个数组（least_squares 要求的格式）
-    lb = np.array([b[0] for b in bounds], float)
-    ub = np.array([b[1] for b in bounds], float)
+    bd = bounds[1:] if fix_d else bounds   # fix_d 时跳过 d 的约束
+    lb = np.array([b[0] for b in bd], float)
+    ub = np.array([b[1] for b in bd], float)
     res = least_squares(residuals, theta0, bounds=(lb, ub), method="trf",
                         xtol=1e-12, ftol=1e-12, gtol=1e-12, max_nfev=1000)
 
-    theta = res.x
-    d, beta = theta[0], theta[1:]
+    if fix_d:
+        theta = np.r_[d0, res.x]
+        d, beta = d0, res.x
+    else:
+        theta = res.x
+        d, beta = theta[0], theta[1:]
     T1 = theory_R(wn1, d, beta, angles[0], n2, model)
     a1, b1 = _lin_solve(T1, R1)
     fit1 = a1 * T1 + b1
@@ -180,24 +193,32 @@ def parameter_uncertainty(res, param_names: list[str], n_lin: int = 0
     return sd, ci, info
 
 
-# 抗噪声能力测试
-def noise_robustness_test(wn1, R1, wn2, R2, d_fit: float, beta_fit: np.ndarray,
-                          model: str, n2: float, angles, bounds,
-                          levels=(0.01, 0.02, 0.05), nrep: int = 5, seed: int = 0) -> dict:
-    """向实测谱加入不同等级高斯噪声，重复拟合，统计厚度 d 的漂移。
+# 抗噪声能力测试（全局：每次加噪后重新做完整反演）
+def noise_robustness_test(wn1, R1, wn2, R2, model: str, n2: float, angles,
+                          bounds, de_bounds,
+                          levels=(0.01, 0.02, 0.05), nrep: int = 5,
+                          seed: int = 0, search_lo: float = 1500.0) -> dict:
+    """向实测谱加入不同等级高斯噪声，每次重新走完整反演流程。
 
-    噪声 σ_n = eta · std(R_obs)。以最终拟合参数 (d_fit, beta_fit) 为初值，
-    反映对最优解的扰动鲁棒性（避免加噪后跳入其它周期分支）。
+    完整反演 = FFT 估 d0 → DE 搜色散初值 → L-M 联合拟合（与主流程同口径）。
+    L-M 固定厚度 d0（fix_d），只优化色散系数，避免多周期分支跳变。
+    因此 d_mean/d_std 反映算法在含噪数据上的真实估计能力。
+    噪声 σ_n = eta · std(R_obs)。
     """
     rng = np.random.default_rng(seed)
     out = {}
     for eta in levels:
         ds = []
-        for _ in range(nrep):
+        for rep in range(nrep):
             n1 = rng.normal(0.0, eta * R1.std(), R1.shape)
             n2 = rng.normal(0.0, eta * R2.std(), R2.shape)
-            fit = lm_fit(wn1, R1 + n1, wn2, R2 + n2, d_fit, beta_fit,
-                         model, n2, angles, bounds)
+            R1n, R2n = R1 + n1, R2 + n2
+            d0n = fft_init_d(wn1, R1n, n_avg=2.6,
+                             theta0_deg=angles[0], search_lo=search_lo)
+            beta0n = de_init_beta(wn1, R1n, wn2, R2n, d0n, model, n2, angles,
+                                  de_bounds, seed=seed + rep)
+            fit = lm_fit(wn1, R1n, wn2, R2n, d0n, beta0n, model, n2, angles,
+                         bounds, seed=seed + rep, fix_d=True)
             ds.append(fit.d)
         out[str(eta)] = {"d_mean": float(np.mean(ds)), "d_std": float(np.std(ds)),
                          "d_min": float(np.min(ds)), "d_max": float(np.max(ds))}

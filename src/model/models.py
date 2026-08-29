@@ -28,6 +28,17 @@ def n_sellmeier(nu: np.ndarray, B1: float, C1: float, B2: float, C2: float) -> n
     t2 = B2 * lam ** 2 / np.maximum(lam ** 2 - C2, 1e-4)
     return np.sqrt(np.maximum(1.0 + t1 + t2, 1e-8))
 
+def n_sellmeier1(nu: np.ndarray, B: float, C: float) -> np.ndarray:
+    """Sellmeier 单振子（UV 吸收边）：n²(λ) = 1 + Bλ²/(λ²-C)，λ 单位 μm。
+
+    物理设定：C 为紫外吸收边 λ_res²（λ_res≈0~1 μm），远小于测量带宽
+    （λ∈[2.5,6.4] μm），故 λ²-C 恒正、n²≈1+B>1，色散正常且单调。
+    """
+    lam = wavenumber_to_wavelength_um(nu)
+    lam2 = lam ** 2
+    denom = np.maximum(lam2 - C, 1e-4)
+    return np.sqrt(np.maximum(1.0 + B * lam2 / denom, 1e-8))
+
 
 # 菲涅尔振幅反射系数
 def fresnel_r(n_inc, n_exit, theta_inc: float):
@@ -87,13 +98,16 @@ def theory_R(nu: np.ndarray, d_um: float, beta: np.ndarray, theta0_deg: float,
              n2: float, model: str, n0: float = 1.0) -> np.ndarray:
     """按指定色散模型计算振荡反射率（%）。
 
-    beta : Cauchy → (A, B, C)；Sellmeier → (B1, C1, B2, C2)
+    beta : Cauchy → (A, B, C)；Sellmeier 双振子 → (B1, C1, B2, C2)；
+           Sellmeier 单振子 → (B, C)
     """
     beta = np.asarray(beta, float)
     if model == "cauchy":
         n1 = n_cauchy(nu, *beta)
     elif model == "sellmeier":
         n1 = n_sellmeier(nu, *beta)
+    elif model == "sellmeier1":
+        n1 = n_sellmeier1(nu, *beta)
     else:
         raise ValueError(f"未知模型: {model}")
     return theory_osc(nu, d_um, n1, theta0_deg, n2, n0)

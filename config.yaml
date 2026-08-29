@@ -33,4 +33,4 @@ outputs:
 
 # ---------- 结果数据 ----------
 result:
-  dir: "result"                  # 数据结果存放目录
+  dir: "outputs/result"         # 数据结果存放目录

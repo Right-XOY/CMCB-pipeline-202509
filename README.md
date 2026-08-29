@@ -45,14 +45,14 @@ CMCB-pipeline-202509/
 │   └── visualize/       # ★ 生图代码：绘制论文所需图表
 ├── outputs/
 │   ├── figures/         # ★ 输出图片（PDF/PNG，论文直接引用）
-│   └── reports/         # q1.md / q2.md / q3.md：各题完整超详细过程与思路
-└── result/              # ★ 数值结果（CSV 等，供论文表格引用）
+│   ├── reports/         # q1.md / q2.md / q3.md：各题完整超详细过程与思路
+│   └── result/          # ★ 数值结果（CSV 等，供论文表格引用）
 ```
 
 **约定**
 
 - 所有路径一律通过 `config.yaml` 读取，代码中不要硬编码路径
-- 结果类数据（数值、表格）放 `result/`，配图放 `outputs/figures/`，过程报告放 `outputs/reports/`
+- 结果类数据（数值、表格）放 `outputs/result/`，配图放 `outputs/figures/`，过程报告放 `outputs/reports/`
 - 原始数据（`data/raw/*.xlsx`）只读不改；清洗后的数据如需保存请放到 `data/` 下新建目录并加入 config
 
 ---

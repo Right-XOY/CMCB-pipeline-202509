@@ -132,11 +132,10 @@ def preprocess(wn: np.ndarray, R: np.ndarray, cutoff: float | None = None,
                hampel_win: int = 11, hampel_t: float = 3.0,
                asls_lam: float = 1e5, asls_p: float = 0.01,
                sg_win: int = 15, sg_poly: int = 3,
-               ) -> tuple[np.ndarray, np.ndarray, float]:
+               ) -> tuple[np.ndarray, np.ndarray, float, np.ndarray, float]:
     """完整预处理流水线：裁剪 → 重采样 → Hampel → AsLS 去基线 → SG 平滑。
 
-    返回 (重采样波数, 去基线后的振荡反射率, 裁剪分界点)。
-    去基线后的谱线围绕 0 振荡，与理论模型振荡项口径一致。
+    返回 (重采样波数, 去基线后的振荡反射率, 裁剪分界点, AsLS 基线, DC 偏移)
     """
     wn = np.asarray(wn, float)
     R = np.asarray(R, float)
@@ -153,6 +152,7 @@ def preprocess(wn: np.ndarray, R: np.ndarray, cutoff: float | None = None,
     baseline = asls_baseline(R, lam=asls_lam, p=asls_p)
     R = R - baseline
     R = sg_smooth(R, win=sg_win, polyorder=sg_poly)
-    R = R - np.mean(R)  # 去 DC 偏移，保证围绕 0 振荡（与理论振荡项口径一致）
+    dc = float(np.mean(R))  # 去 DC 前的均值（用于图形上重建原始口径）
+    R = R - dc              # 去 DC 偏移，保证围绕 0 振荡（与理论振荡项口径一致）
 
-    return wn, R, float(cutoff)
+    return wn, R, float(cutoff), baseline, dc

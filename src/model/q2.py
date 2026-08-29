@@ -130,15 +130,16 @@ def main() -> None:
     spec = {}
     for key, path in [("f1", raw["f1"]), ("f2", raw["f2"])]:
         wn, R = load_spectra(root / path)
-        wn_p, R_p, cutoff = preprocess(wn, R, **PREPROC)
+        wn_p, R_p, cutoff, baseline, dc = preprocess(wn, R, **PREPROC)
         # 裁剪分界点合理性防护：异常时回退默认 1000 cm⁻¹
         if not (700.0 <= cutoff <= 1600.0):
             cutoff = 1000.0
-            wn_p, R_p, _ = preprocess(wn, R, cutoff=cutoff, **PREPROC)
+            wn_p, R_p, _, baseline, dc = preprocess(wn, R, cutoff=cutoff, **PREPROC)
         spec[key] = (wn_p, R_p)
         print(f"  {key}: {len(wn)} 点 -> 裁剪点 {cutoff:.1f} cm-1 -> {len(wn_p)} 点")
         save_csv(result_dir / f"q2_processed_{key}.csv",
-                 "wavenumber_cm-1,reflectance_osc_%", [wn_p, R_p])
+                 "wavenumber_cm-1,reflectance_osc_%,baseline_%,dc_%",
+                 [wn_p, R_p, baseline, np.full(len(baseline), dc)])
 
     wn1, R1 = spec["f1"]
     wn2, R2 = spec["f2"]

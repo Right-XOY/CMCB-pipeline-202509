@@ -25,7 +25,7 @@ from scipy.optimize import differential_evolution, least_squares
 
 from preprocess import (find_cutoff_stft, hampel_filter, load_spectra,
                         resample, sg_smooth, preprocess)
-from models import airy_reflectance_avg, n_cauchy, two_beam_reflectance_avg
+from models import airy_reflectance_avg, n_drude, n_sellmeier1, two_beam_reflectance_avg
 from fitting import (de_init_beta, fft_init_d, fit_statistics,
                      parameter_uncertainty, profile_scan_d)
 
@@ -36,27 +36,38 @@ ANGLES = (ANG1, ANG2)
 
 # 硅片 FFT 初值用平均折射率（红外区 n ≈ 3.42）
 N_SI_AVG = 3.42
-# 硅外延层折射率（红外区，固定为文献值；色散极弱，取常数近似）
-N1_SI = 3.42
 # 硅片预处理裁剪点（自由载流子 Drude 反射区之上，2000 cm⁻¹ 起条纹干净）
 SI_CUTOFF = 2000.0
 PREPROC = dict(hampel_win=11, hampel_t=3.0, sg_win=15, sg_poly=3)
 
-# Airy 模型参数 θ = [d, n2_real, kappa2, sigma_d]
-#   n1 = N1_SI（外延层折射率固定，轻掺杂近似透明）
-#   n2 = n2_real + i·κ2（衬底，重掺杂自由载流子吸收）
-#   σ_d：光斑内厚度不均匀标准差，解释条纹对比度随波数的高斯衰减
-AIRY_NAMES = ["d(um)", "n2_real", "kappa2", "sigma_d(um)"]
-AIRY_BOUNDS = [(0.5, 200.0), (2.5, 3.6), (0.0, 1.0), (0.0, 0.5)]
-AIRY_DE_BOUNDS = [(2.5, 3.6), (0.0, 1.0), (0.0, 0.5)]
-AIRY_X0 = [3.1, 0.1, 0.1]                # DE 搜索前参考初值（衬底/不均匀）
+# 硅片外延层折射率 n1：轻掺杂硅在红外波段几乎无色散，取已知常数 n1≈3.42。
+#   用 Sellmeier 单振子 n1²=1+Bλ²/(λ²−C) 的极限 B=10.7、C=0（n1²=1+B=11.7），
+#   即 Q2 比选出的最优色散模型在"无色散硅"下的退化形式。
+#   固定 n1 是关键：若把 B 也作为自由参数，会与每角度线性增益 a 耦合，产生
+#   "n1→n2（两界面折射率相等→r12→0→条纹消失）"的退化解——增益 a 把近似平坦的
+#   理论值放大成虚假低 SSE。n1 固定后，衬底折射率 n2 由条纹幅度唯一确定。
+# 衬底 n2 用 Drude 色散 n2²(ν)=n_inf²−wp²/(ν²+iγν) 描述（重掺杂硅自由载流子
+#   响应）：ν→∞ 时 n2→n_inf（接近本征硅折射率），低波数端自由载流子使 n2 实部
+#   下降、引入吸收 κ2。Drude 使 r12(ν) 与条纹包络随波数衰减，且均匀作用于全部
+#   谐波——既不破坏多光束高阶项，又解释"条纹对比度随波数衰减约 6 倍"的包络。
+# σ_d（光斑内厚度不均匀）已取消：多光束干涉的必要条件之一是厚度均匀，故取
+#   理想平行平面 σ_d=0 作为判定多光束的基准口径。
+SI_B = 10.7
+SI_C = 0.0
+SI_N1 = float(np.sqrt(1.0 + SI_B))          # ≈ 3.4205
 
-# 双光束模型参数 θ = [d, n2, sigma_d]（实数折射率，一阶近似 + 厚度平均）
-#   与 Airy 保持相同自由度（线性校正、σ_d），仅差"多光束高阶项"，供 AIC/BIC 公平对比
-TWO_NAMES = ["d(um)", "n2", "sigma_d(um)"]
-TWO_BOUNDS = [(0.5, 200.0), (2.5, 3.6), (0.0, 0.5)]
-TWO_DE_BOUNDS = [(2.5, 3.6), (0.0, 0.5)]
-TWO_X0 = [3.1, 0.1]
+# 双光束模型 θ = [d, n_inf, wp, gamma]（衬底 n2 用 Drude 色散，一阶近似，理想平面 σ_d=0）
+#   与 Airy 参数完全一致（仅差多光束高阶项），供 AIC/BIC 公平对比
+TWO_NAMES = ["d(um)", "n_inf", "wp", "gamma"]
+TWO_BOUNDS = [(0.5, 200.0), (2.5, 3.4), (300.0, 8000.0), (5.0, 500.0)]
+TWO_DE_BOUNDS = [(2.5, 3.4), (300.0, 8000.0), (5.0, 500.0)]
+TWO_X0 = [3.0, 2500.0, 100.0]
+
+# Airy 模型参数 θ = [d, n_inf, wp, gamma]（Drude 色散 n2 含自由载流子吸收，多光束高阶项，σ_d=0）
+AIRY_NAMES = ["d(um)", "n_inf", "wp", "gamma"]
+AIRY_BOUNDS = [(0.5, 200.0), (2.5, 3.4), (300.0, 8000.0), (5.0, 500.0)]
+AIRY_DE_BOUNDS = [(2.5, 3.4), (300.0, 8000.0), (5.0, 500.0)]
+AIRY_X0 = [3.0, 2500.0, 100.0]
 
 # 碳化硅（附件 1/2）：与问题二同口径 —— AsLS 去基线拟合振荡项，衬底 n2 固定
 SIC_CUTOFF_FALLBACK = 1000.0  # STFT 定界失效时的回退裁剪点（cm⁻¹）
@@ -64,13 +75,13 @@ N2_SIC = 2.65                 # SiC 衬底折射率（问题二固定值，选�
 SIC_PREPROC = dict(hampel_win=11, hampel_t=3.0, asls_lam=1e5, asls_p=0.01,
                    sg_win=15, sg_poly=3)
 
-# SiC 双光束 / Airy 参数（与问题二同口径：n2 固定 2.65，θ 均为 [d, A, B, C]）
+# SiC 双光束 / Airy 参数（与问题二同口径：单振子色散，n2 固定 2.65，θ 均为 [d, B, C]）
 #   双光束 = theory_osc（一阶振荡项）；Airy = 完整 Airy 振荡项（含多光束高阶项）
 #   两者参数相同、n2 相同，仅差"多光束高阶项"，供 AIC/BIC 公平对比
-#   n1(ν) = A + B/λ² + C/λ⁴（Cauchy，λ 单位 μm；边界同问题二 cauchy）
-SIC_NAMES_TWO = ["d(um)", "A", "B", "C"]
-SIC_NAMES_AIRY = ["d(um)", "A", "B", "C"]
-SIC_CAUCHY_BOUNDS = [(1.5, 3.5), (-1.0, 1.0), (-1.0, 1.0)]
+#   n1²(λ) = 1 + Bλ²/(λ²−C)（Sellmeier 单振子；边界同问题二 sellmeier1）
+SIC_NAMES_TWO = ["d(um)", "B", "C"]
+SIC_NAMES_AIRY = ["d(um)", "B", "C"]
+SIC_SELLMEIER1_BOUNDS = [(0.0, 8.0), (0.0, 1.0)]
 
 SEED = 2025
 
@@ -129,39 +140,37 @@ def detrend_poly(wn: np.ndarray, R: np.ndarray, deg: int = 2) -> np.ndarray:
     return R - np.polyval(p, wn)
 
 
-# Airy 模型（固定 n1 + 衬底吸收 + 厚度不均匀）：θ = [d, n2_real, kappa2, sigma_d]
+# Airy 模型（n1 固定常数 + Drude 色散衬底 + 理想平行平面 σ_d=0）：θ = [d, n_inf, wp, gamma]
 def airy_R(nu, theta_deg, theta) -> np.ndarray:
-    d, n2r, k2, sd = theta
-    n2 = n2r + 1j * k2
-    return airy_reflectance_avg(nu, d, sd, N1_SI, n2, theta_deg, N0)
+    d, n_inf, wp, gamma = theta
+    n1 = n_sellmeier1(nu, SI_B, SI_C)
+    n2 = n_drude(nu, n_inf, wp, gamma)
+    return airy_reflectance_avg(nu, d, 0.0, n1, n2, theta_deg, N0)
 
 
-# 双光束模型（固定 n1 + 厚度平均，无吸收）：θ = [d, n2, sigma_d]
+# 双光束模型（n1 固定常数 + Drude 色散衬底 + 理想平行平面 σ_d=0）：θ = [d, n_inf, wp, gamma]
 def twobeam_R(nu, theta_deg, theta) -> np.ndarray:
-    d, n2, sd = theta
-    return two_beam_reflectance_avg(nu, d, sd, N1_SI, n2, theta_deg, N0)
-
-
-def _lin_solve(T: np.ndarray, R: np.ndarray) -> tuple[float, float]:
-    """对固定理论值 T 做最小二乘求线性校正 R ≈ a·T + b（闭式消元）。"""
-    A = np.column_stack([T, np.ones_like(T)])
-    sol, *_ = np.linalg.lstsq(A, R, rcond=None)
-    return float(sol[0]), float(sol[1])
+    d, n_inf, wp, gamma = theta
+    n1 = n_sellmeier1(nu, SI_B, SI_C)
+    n2 = n_drude(nu, n_inf, wp, gamma)
+    return two_beam_reflectance_avg(nu, d, 0.0, n1, n2, theta_deg, N0)
 
 
 def make_residual(wn1, R1, wn2, R2, model_func):
-    """拼接双角度残差，每角度独立线性校正 R_obs ≈ a·T + b（闭式消元）。
+    """拼接双角度残差，每角度独立 DC 偏置校正 R_obs ≈ T + b（闭式消元，无增益）。
 
-    两角度反射率的绝对 DC 水平存在仪器/角度校准偏差（实测相差约 2.7%），
-    用每角度独立的 (a, b) 校正吸收，不进入优化器，与问题二口径一致。
+    硅片反射率是绝对反射率（~30%），DC 水平由已知 n1≈3.42 唯一确定，故只校正
+    每角度独立的仪器 DC 偏置 b（两角度实测 DC 相差约 2.7% 的校准偏差），不再引入
+    增益 a。增益 a 会与折射率/幅度参数耦合，产生"把近似平坦理论值放大成虚假低
+    SSE"的退化解，因此这里显式剔除。
     """
     def resid(theta):
         T1 = model_func(wn1, ANG1, theta)
-        a1, b1 = _lin_solve(T1, R1)
-        e1 = a1 * T1 + b1 - R1
+        b1 = float(np.mean(R1 - T1))
+        e1 = T1 + b1 - R1
         T2 = model_func(wn2, ANG2, theta)
-        a2, b2 = _lin_solve(T2, R2)
-        e2 = a2 * T2 + b2 - R2
+        b2 = float(np.mean(R2 - T2))
+        e2 = T2 + b2 - R2
         return np.concatenate([e1, e2])
     return resid
 
@@ -217,36 +226,44 @@ def rho_estimate(n1, n2):
     return float(abs(r01 * r12))
 
 
+def rho_drude(nu, n_inf, wp, gamma):
+    """Drude 衬底下的界面反射率 ρ = mean|r01·r12|（带内平均，n1 固定为 SI_N1）。"""
+    n2 = n_drude(nu, n_inf, wp, gamma)
+    r01 = (N0 - SI_N1) / (N0 + SI_N1)
+    r12 = (SI_N1 - n2) / (SI_N1 + n2)
+    return float(np.mean(np.abs(r01 * r12)))
+
+
 def solve_silicon(wn1, R1, wn2, R2, d0, seed=SEED) -> dict:
     """对硅片做双光束 + Airy 双模型反演与多光束判定。"""
-    n_lin = 4  # 双角度各 (a, b) 线性校正参数，闭式消元
+    n_lin = 2  # 双角度各 1 个 DC 偏置 b，闭式消元
     # 1) 双光束拟合（判定基准 + 残差谐波）
     res_two, _ = fit_model(wn1, R1, wn2, R2, d0, twobeam_R,
                            TWO_BOUNDS, TWO_DE_BOUNDS, seed)
     theta_two = res_two.x
-    d_two, n2_two, sd_two = theta_two
+    d_two, n_inf_two, wp_two, gamma_two = theta_two
     n1_ = len(wn1)
     r_two1 = res_two.fun[:n1_]
     stats_two = fit_statistics(res_two, len(theta_two) + n_lin, R1, R2)
-    # 残差谐波（用 10° 残差；f0 = 2 n1 d cosθ1 / 1e4，n1 固定为 N1_SI）
-    th1 = np.arcsin(np.sin(np.deg2rad(ANG1)) / N1_SI)
-    f0 = 2.0 * N1_SI * d_two * np.cos(th1) / 1e4
+    # 残差谐波（用 10° 残差；f0 = 2 n1 d cosθ1 / 1e4，n1 为固定常数）
+    th1 = np.arcsin(np.sin(np.deg2rad(ANG1)) / SI_N1)
+    f0 = 2.0 * SI_N1 * d_two * np.cos(th1) / 1e4
     harm_two = residual_harmonics(wn1, r_two1, f0)
-    rho_two = rho_estimate(N1_SI, n2_two)
+    rho_two = rho_drude(wn1, n_inf_two, wp_two, gamma_two)
 
     # 2) Airy 拟合
     res_airy, _ = fit_model(wn1, R1, wn2, R2, d0, airy_R,
                             AIRY_BOUNDS, AIRY_DE_BOUNDS, seed)
     theta_airy = res_airy.x
-    d_airy, n2r_airy, k2_airy, sd_airy = theta_airy
+    d_airy, n_inf_airy, wp_airy, gamma_airy = theta_airy
     r_airy1 = res_airy.fun[:n1_]
     stats_airy = fit_statistics(res_airy, len(theta_airy) + n_lin, R1, R2)
     sd_a, ci_a, _ = parameter_uncertainty(res_airy, AIRY_NAMES, n_lin=n_lin)
-    # Airy 主频 f0_airy 与 ρ 用固定外延层折射率 N1_SI
-    th1_airy = np.arcsin(np.sin(np.deg2rad(ANG1)) / N1_SI)
-    f0_airy = 2.0 * N1_SI * d_airy * np.cos(th1_airy) / 1e4
+    # Airy 主频 f0_airy 与 ρ 用固定 n1
+    th1_airy = np.arcsin(np.sin(np.deg2rad(ANG1)) / SI_N1)
+    f0_airy = 2.0 * SI_N1 * d_airy * np.cos(th1_airy) / 1e4
     harm_airy = residual_harmonics(wn1, r_airy1, f0_airy)
-    rho_airy = rho_estimate(N1_SI, n2r_airy + 1j * k2_airy)
+    rho_airy = rho_drude(wn1, n_inf_airy, wp_airy, gamma_airy)
 
     return {
         "d0": d0,
@@ -271,46 +288,47 @@ def solve_silicon(wn1, R1, wn2, R2, d0, seed=SEED) -> dict:
 def solve_sic(wn1, R1, wn2, R2, d0, seed=SEED) -> dict:
     """对 SiC 做双光束 + Airy 双模型反演与多光束判定（与问题二同口径）。
 
-    SiC 外延层 n1 用 Cauchy 色散，衬底 n2 固定 2.65（问题二值）；双光束用
-    一阶振荡项 theory_osc，Airy 用完整多光束振荡项，两者参数均为 [d,A,B,C]、
-    n2 相同，仅差多光束高阶项，供 AIC/BIC 公平对比。厚度边界按 FFT 初值 d0
-    收窄到 [d0-0.5, d0+0.5]，避免分支跳变（同问题二剖面扫描口径）。
+    SiC 外延层 n1 用 Sellmeier 单振子色散（问题二比选出的最优模型），衬底
+    n2 固定 2.65（问题二值）；双光束用一阶振荡项 theory_osc，Airy 用完整
+    多光束振荡项，两者参数均为 [d,B,C]、n2 相同，仅差多光束高阶项，供
+    AIC/BIC 公平对比。厚度边界按 FFT 初值 d0 收窄到 [d0-0.5, d0+0.5]，
+    避免分支跳变（同问题二剖面扫描口径）。
     """
     d_half, step = 0.5, 0.01
-    bounds = [(max(0.5, d0 - d_half), d0 + d_half)] + list(SIC_CAUCHY_BOUNDS)
+    bounds = [(max(0.5, d0 - d_half), d0 + d_half)] + list(SIC_SELLMEIER1_BOUNDS)
 
-    # 1) 双光束（Q2 cauchy 口径：theory_osc + Cauchy n1，n2 固定 2.65）
-    beta0_two = de_init_beta(wn1, R1, wn2, R2, d0, "cauchy", N2_SIC, ANGLES,
-                             SIC_CAUCHY_BOUNDS, seed=seed)
-    fit_two, prof_two = profile_scan_d(wn1, R1, wn2, R2, d0, beta0_two, "cauchy",
+    # 1) 双光束（Q2 sellmeier1 口径：theory_osc + 单振子 n1，n2 固定 2.65）
+    beta0_two = de_init_beta(wn1, R1, wn2, R2, d0, "sellmeier1", N2_SIC, ANGLES,
+                             SIC_SELLMEIER1_BOUNDS, seed=seed)
+    fit_two, prof_two = profile_scan_d(wn1, R1, wn2, R2, d0, beta0_two, "sellmeier1",
                                        N2_SIC, ANGLES, bounds, d_half=d_half,
                                        step=step, seed=seed)
     theta_two = fit_two.theta.tolist()
     d_two = float(fit_two.d)
-    A2, B2, C2 = [float(v) for v in fit_two.beta]
+    B2, C2 = [float(v) for v in fit_two.beta]
     stats_two = fit_statistics(fit_two.res, fit_two.res.x.size + fit_two.n_lin, R1, R2)
     r_two1 = fit_two.residual1
     # 主频用带内平均相位折射率近似（色散使 f0 微展宽，仅作谐波定位）
-    n1m = float(n_cauchy(wn1, A2, B2, C2).mean())
+    n1m = float(n_sellmeier1(wn1, B2, C2).mean())
     th1 = np.arcsin(np.sin(np.deg2rad(ANG1)) / n1m)
     f0 = 2.0 * n1m * d_two * np.cos(th1) / 1e4
     harm_two = residual_harmonics(wn1, r_two1, f0)
     rho_two = rho_estimate(n1m, N2_SIC)
 
-    # 2) Airy（Q2 同口径：airy_reflectance_osc + Cauchy n1，仅多光束高阶项不同）
-    beta0_airy = de_init_beta(wn1, R1, wn2, R2, d0, "airy", N2_SIC, ANGLES,
-                              SIC_CAUCHY_BOUNDS, seed=seed)
-    fit_airy, prof_airy = profile_scan_d(wn1, R1, wn2, R2, d0, beta0_airy, "airy",
+    # 2) Airy（Q2 同口径：airy_reflectance_osc + 单振子 n1，仅多光束高阶项不同）
+    beta0_airy = de_init_beta(wn1, R1, wn2, R2, d0, "airy_sellmeier1", N2_SIC, ANGLES,
+                              SIC_SELLMEIER1_BOUNDS, seed=seed)
+    fit_airy, prof_airy = profile_scan_d(wn1, R1, wn2, R2, d0, beta0_airy, "airy_sellmeier1",
                                          N2_SIC, ANGLES, bounds, d_half=d_half,
                                          step=step, seed=seed)
     theta_airy = fit_airy.theta.tolist()
     d_airy = float(fit_airy.d)
-    Aa, Ba, Ca = [float(v) for v in fit_airy.beta]
+    Ba, Ca = [float(v) for v in fit_airy.beta]
     stats_airy = fit_statistics(fit_airy.res, fit_airy.res.x.size + fit_airy.n_lin, R1, R2)
     r_airy1 = fit_airy.residual1
-    sd_beta, ci_beta, _ = parameter_uncertainty(fit_airy.res, ["A", "B", "C"],
+    sd_beta, ci_beta, _ = parameter_uncertainty(fit_airy.res, ["B", "C"],
                                                 n_lin=fit_airy.n_lin)
-    n1ma = float(n_cauchy(wn1, Aa, Ba, Ca).mean())
+    n1ma = float(n_sellmeier1(wn1, Ba, Ca).mean())
     th1a = np.arcsin(np.sin(np.deg2rad(ANG1)) / n1ma)
     f0_airy = 2.0 * n1ma * d_airy * np.cos(th1a) / 1e4
     harm_airy = residual_harmonics(wn1, r_airy1, f0_airy)

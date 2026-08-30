@@ -1,22 +1,23 @@
-"""问题三生图脚本：多光束判定 + 硅片/SiC 反演的全部数据驱动图。
+"""问题三生图脚本：多光束判定 + 硅晶圆片/碳化硅晶圆片 反演的全部数据驱动图。
 
 运行方式（在项目根目录）：
     python src/visualize/visualize_q3.py
 
 数据来源：
   - 原始光谱：data/raw/附件3.xlsx、附件4.xlsx（复用 preprocess.load_spectra）
-  - 预处理结果：outputs/result/q3_processed_f3/f4.csv（硅片，保留 DC）、
-                 outputs/result/q3_processed_f1/f2.csv（SiC，振荡项）
+  - 预处理结果：outputs/result/q3_processed_f3/f4.csv（硅晶圆片，保留 DC）、
+                 outputs/result/q3_processed_f1/f2.csv（碳化硅晶圆片，振荡项）
   - 判定/拟合结果：outputs/result/q3_silicon.json、q3_sic.json
 
 输出：outputs/figures/q3/
-  fig01_raw_f3/f4                原始干涉光谱（硅片）
+  fig01_raw_f3/f4                原始干涉光谱（硅晶圆片）
   fig02_cropped_f3/f4            裁剪后光谱（标注 2000 cm-1 分界点）
-  fig03_fit_silicon              硅片 双光束 vs Airy 拟合对比
-  fig04_residuals_silicon        硅片 双光束 vs Airy 残差
-  fig05_residual_fft_silicon     硅片 双光束残差频谱（谐波检验）
-  fig06_fit_sic                  SiC  双光束 vs Airy 拟合对比（振荡口径）
-  fig07_residual_fft_sic         SiC  双光束残差频谱（谐波检验）
+  fig03_fit_silicon              硅晶圆片 双光束 vs Airy 拟合对比
+  fig04_residuals_silicon        硅晶圆片 双光束 vs Airy 残差
+  fig05_residual_fft_silicon     硅晶圆片 双光束残差频谱（谐波检验）
+  fig06_fit_sic                  碳化硅晶圆片  双光束 vs Airy 拟合对比（振荡口径）
+  fig07_residual_fft_sic         碳化硅晶圆片  双光束残差频谱（谐波检验）
+  fig08_sim_spectrum             仿真：衬底吸收 κ2 对反射光谱形状的影响
   fig08_sim_bias                 仿真：双光束反演厚度偏差随衬底吸收变化
   fig09_aic_compare              双光束 vs Airy 的 AIC/BIC 对比
   fig10_thickness                双光束 vs Airy 厚度修正对比
@@ -36,8 +37,8 @@ import yaml
 ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT / "src" / "model"))
 from preprocess import load_spectra, resample  # noqa: E402
-from models import (airy_reflectance_avg, airy_reflectance_osc, n_cauchy,  # noqa: E402
-                    theory_osc, two_beam_reflectance_avg)
+from models import (airy_reflectance_avg, airy_reflectance_osc, n_drude,  # noqa: E402
+                    n_sellmeier1, theory_osc, two_beam_reflectance_avg)
 
 # matplotlib 全局样式：与 q2 生图脚本保持一致（PNG + 彩色 + 中文）
 plt.rcParams.update({
@@ -53,14 +54,14 @@ plt.rcParams.update({
 })
 C_F3 = "#d62728"     # 附件3（10°）红
 C_F4 = "#1f77b4"     # 附件4（15°）蓝
-C_TWO = "#7f7f7f"    # 双光束 灰
+C_TWO = "#1f77b4"    # 双光束 蓝
 C_AIRY = "#2ca02c"   # Airy 绿
 
 # 与 q3.py 保持一致的物理常量
 N0 = 1.0
-N1_SI = 3.42         # 硅外延层折射率（固定）
-N2_SIC = 2.65        # SiC 衬底折射率（固定）
-SI_CUTOFF = 2000.0   # 硅片预处理裁剪点（cm-1）
+SI_B, SI_C = 10.7, 0.0   # 硅外延层 Sellmeier 单振子参数（固定，n1≈3.42）
+N2_SIC = 2.65            # 碳化硅晶圆片 衬底折射率（固定）
+SI_CUTOFF = 2000.0       # 硅晶圆片预处理裁剪点（cm-1）
 ANG1, ANG2 = 10.0, 15.0
 
 
@@ -70,45 +71,53 @@ def load_config() -> dict:
 
 
 # ---------------------------------------------------------------- 模型重建
-def _lin_fit(T: np.ndarray, R: np.ndarray) -> tuple[float, float]:
-    """复现 q3.py 的每角度线性校正 R ≈ a·T + b（闭式最小二乘）。"""
-    A = np.column_stack([T, np.ones_like(T)])
-    sol, *_ = np.linalg.lstsq(A, R, rcond=None)
-    return float(sol[0]), float(sol[1])
+def _n1_si(nu):
+    """硅晶圆片外延层折射率（固定 Sellmeier 单振子 B=10.7, C=0 → n1≈3.42）。"""
+    return n_sellmeier1(nu, SI_B, SI_C)
 
 
 def si_two_beam(nu, ang, theta):
-    """硅片双光束完整反射率（含 σ_d 厚度平均）。theta=[d, n2, sigma_d]。"""
-    d, n2, sd = theta
-    return two_beam_reflectance_avg(nu, d, sd, N1_SI, n2, ang, N0)
+    """硅晶圆片双光束完整反射率（Drude 衬底，理想平面 σ_d=0）。theta=[d, n_inf, wp, gamma]。"""
+    d, n_inf, wp, gamma = theta
+    n2 = n_drude(nu, n_inf, wp, gamma)
+    return two_beam_reflectance_avg(nu, d, 0.0, _n1_si(nu), n2, ang, N0)
 
 
 def si_airy(nu, ang, theta):
-    """硅片 Airy 完整反射率（复衬底 + σ_d 厚度平均）。theta=[d, n2r, k2, sigma_d]。"""
-    d, n2r, k2, sd = theta
-    n2 = n2r + 1j * k2
-    return airy_reflectance_avg(nu, d, sd, N1_SI, n2, ang, N0)
+    """硅晶圆片 Airy 完整反射率（Drude 衬底，理想平面 σ_d=0）。theta=[d, n_inf, wp, gamma]。"""
+    d, n_inf, wp, gamma = theta
+    n2 = n_drude(nu, n_inf, wp, gamma)
+    return airy_reflectance_avg(nu, d, 0.0, _n1_si(nu), n2, ang, N0)
 
 
 def sic_two_beam(nu, ang, theta):
-    """SiC 双光束振荡项（Cauchy n1，n2 固定 2.65）。theta=[d, A, B, C]。"""
-    d, A, B, C = theta
-    n1 = n_cauchy(nu, A, B, C)
+    """碳化硅晶圆片 双光束振荡项（Sellmeier 单振子 n1，n2 固定 2.65）。theta=[d, B, C]。"""
+    d, B, C = theta
+    n1 = n_sellmeier1(nu, B, C)
     return theory_osc(nu, d, n1, ang, N2_SIC, N0)
 
 
 def sic_airy(nu, ang, theta):
-    """SiC Airy 多光束振荡项（Cauchy n1，n2 固定 2.65）。theta=[d, A, B, C]。"""
-    d, A, B, C = theta
-    n1 = n_cauchy(nu, A, B, C)
+    """碳化硅晶圆片 Airy 多光束振荡项（Sellmeier 单振子 n1，n2 固定 2.65）。theta=[d, B, C]。"""
+    d, B, C = theta
+    n1 = n_sellmeier1(nu, B, C)
     return airy_reflectance_osc(nu, d, n1, N2_SIC, ang, N0)
 
 
-def _fit_curve(wn, R, theta, model_func, ang):
-    """重建某角度拟合曲线 R_fit = a·T + b，返回 (R_fit, a, b)。"""
+def _fit_offset(wn, R, theta, model_func, ang):
+    """硅晶圆片拟合曲线重建：R_fit = T + b（仅 DC 偏置，无增益，与 q3.py 口径一致）。"""
     T = model_func(wn, ang, theta)
-    a, b = _lin_fit(T, R)
-    return a * T + b, a, b
+    b = float(np.mean(R - T))
+    return T + b
+
+
+def _fit_gain(wn, R, theta, model_func, ang):
+    """碳化硅晶圆片 拟合曲线重建：R_fit = a·T + b（增益 + 偏置，与 q3.py 口径一致）。"""
+    T = model_func(wn, ang, theta)
+    A = np.column_stack([T, np.ones_like(T)])
+    sol, *_ = np.linalg.lstsq(A, R, rcond=None)
+    a, b = float(sol[0]), float(sol[1])
+    return a * T + b
 
 
 # ---------------------------------------------------------------- 图
@@ -129,7 +138,7 @@ def fig01_raw(out_dir: Path, wn3, R3, wn4, R4) -> None:
 
 
 def fig02_cropped(out_dir: Path, wn3, R3, wn4, R4) -> None:
-    """硅片裁剪并等间距重采样后的光谱（标注 2000 cm-1 分界点）。"""
+    """硅晶圆片裁剪并等间距重采样后的光谱（标注 2000 cm-1 分界点）。"""
     for tag, wn, R, color, label in [
             ("f3", wn3, R3, C_F3, "附件3（10°）"),
             ("f4", wn4, R4, C_F4, "附件4（15°）")]:
@@ -149,20 +158,20 @@ def fig02_cropped(out_dir: Path, wn3, R3, wn4, R4) -> None:
 
 
 def fig03_fit_silicon(out_dir: Path, p3, p4, si: dict) -> None:
-    """硅片：双光束 vs Airy 拟合对比（完整反射率口径，两角度）。"""
+    """硅晶圆片：双光束 vs Airy 拟合对比（完整反射率口径，两角度）。"""
     theta_two = si["two_beam"]["theta"]
     theta_airy = si["airy"]["theta"]
     fig, axes = plt.subplots(2, 1, figsize=(8, 6.2), sharex=True)
     for ax, p, color, angle in [
             (axes[0], p3, C_F3, ANG1), (axes[1], p4, C_F4, ANG2)]:
         wn, R = p[:, 0], p[:, 1]
-        fit_two, _, _ = _fit_curve(wn, R, theta_two, si_two_beam, angle)
-        fit_airy, _, _ = _fit_curve(wn, R, theta_airy, si_airy, angle)
+        fit_two = _fit_offset(wn, R, theta_two, si_two_beam, angle)
+        fit_airy = _fit_offset(wn, R, theta_airy, si_airy, angle)
         ax.plot(wn, R, color=color, lw=0.7, alpha=0.8, label="实测")
         ax.plot(wn, fit_two, color=C_TWO, lw=1.0, ls="--", label="双光束")
         ax.plot(wn, fit_airy, color=C_AIRY, lw=1.0, label="Airy")
         ax.set_ylabel("反射率（%）")
-        ax.set_title(f"硅片 入射角 {angle:.0f}°：双光束 vs Airy 拟合")
+        ax.set_title(f"硅晶圆片 入射角 {angle:.0f}°：双光束 vs Airy 拟合")
         ax.legend(loc="lower right", ncol=3)
     axes[1].set_xlabel("波数（cm-1）")
     fig.tight_layout()
@@ -172,30 +181,30 @@ def fig03_fit_silicon(out_dir: Path, p3, p4, si: dict) -> None:
 
 
 def fig04_residuals_silicon(out_dir: Path, p3, p4, si: dict) -> None:
-    """硅片：双光束 vs Airy 残差（按入射角拆成两张，上下子图为两种模型）。"""
+    """硅晶圆片：双光束 vs Airy 残差（按入射角拆成两张，上下子图为两种模型）。"""
     theta_two = si["two_beam"]["theta"]
     theta_airy = si["airy"]["theta"]
     for tag, p, angle, color in [
             ("f3", p3, ANG1, C_F3), ("f4", p4, ANG2, C_F4)]:
         wn, R = p[:, 0], p[:, 1]
-        fit_two, _, _ = _fit_curve(wn, R, theta_two, si_two_beam, angle)
-        fit_airy, _, _ = _fit_curve(wn, R, theta_airy, si_airy, angle)
+        fit_two = _fit_offset(wn, R, theta_two, si_two_beam, angle)
+        fit_airy = _fit_offset(wn, R, theta_airy, si_airy, angle)
         res_two = R - fit_two
         res_airy = R - fit_airy
         rmse_two = float(np.sqrt(np.mean(res_two ** 2)))
         rmse_airy = float(np.sqrt(np.mean(res_airy ** 2)))
         fig, axes = plt.subplots(2, 1, figsize=(8, 6.2), sharex=True)
         axes[0].plot(wn, res_two, color=C_TWO, lw=0.7,
-                     label=f"双光束（RMSE={rmse_two:.4f}）")
+                     label=f"双光束（RMSE={rmse_two:.4f}%）")
         axes[0].axhline(0, color="k", lw=0.8, ls="--")
         axes[0].set_ylabel("残差（%）")
-        axes[0].set_title(f"硅片 入射角 {angle:.0f}°：双光束残差")
+        axes[0].set_title(f"硅晶圆片 入射角 {angle:.0f}°：双光束残差")
         axes[0].legend(loc="upper right")
         axes[1].plot(wn, res_airy, color=C_AIRY, lw=0.7,
-                     label=f"Airy（RMSE={rmse_airy:.4f}）")
+                     label=f"Airy（RMSE={rmse_airy:.4f}%）")
         axes[1].axhline(0, color="k", lw=0.8, ls="--")
         axes[1].set_ylabel("残差（%）")
-        axes[1].set_title(f"硅片 入射角 {angle:.0f}°：Airy 残差")
+        axes[1].set_title(f"硅晶圆片 入射角 {angle:.0f}°：Airy 残差")
         axes[1].legend(loc="upper right")
         axes[1].set_xlabel("波数（cm-1）")
         fig.tight_layout()
@@ -204,11 +213,11 @@ def fig04_residuals_silicon(out_dir: Path, p3, p4, si: dict) -> None:
         print(f"save -> {out_dir.name}/q3_fig04_residuals_silicon_{tag}.png")
 
 
-def _fig_residual_fft(out_dir: Path, p, theta_two, model_func, f0: float,
+def _fig_residual_fft(out_dir: Path, p, theta_two, model_func, fit_func, f0: float,
                       harm: dict, tag: str, title: str) -> None:
     """双光束残差频谱（谐波检验）：标注 f0/2f0/3f0 位置。"""
     wn, R = p[:, 0], p[:, 1]
-    fit_two, _, _ = _fit_curve(wn, R, theta_two, model_func, ANG1)
+    fit_two = fit_func(wn, R, theta_two, model_func, ANG1)
     resid = R - fit_two
     dnu = float(np.median(np.diff(wn)))
     F = np.abs(np.fft.rfft(resid * np.hanning(len(resid)))) ** 2
@@ -233,27 +242,27 @@ def _fig_residual_fft(out_dir: Path, p, theta_two, model_func, f0: float,
 
 
 def fig05_residual_fft_silicon(out_dir: Path, p3, si: dict) -> None:
-    """硅片双光束残差频谱（谐波检验）。"""
-    _fig_residual_fft(out_dir, p3, si["two_beam"]["theta"], si_two_beam,
+    """硅晶圆片双光束残差频谱（谐波检验）。"""
+    _fig_residual_fft(out_dir, p3, si["two_beam"]["theta"], si_two_beam, _fit_offset,
                       si["f0"], si["two_beam"]["harmonics"],
-                      "q3_fig05_residual_fft_silicon", "硅片 双光束残差频谱")
+                      "q3_fig05_residual_fft_silicon", "硅晶圆片 双光束残差频谱")
 
 
 def fig06_fit_sic(out_dir: Path, p1, p2, sic: dict) -> None:
-    """SiC：双光束 vs Airy 拟合对比（振荡口径，两角度）。"""
+    """碳化硅晶圆片：双光束 vs Airy 拟合对比（振荡口径，两角度）。"""
     theta_two = sic["two_beam"]["theta"]
     theta_airy = sic["airy"]["theta"]
     fig, axes = plt.subplots(2, 1, figsize=(8, 6.2), sharex=True)
     for ax, p, color, angle in [
             (axes[0], p1, C_F3, ANG1), (axes[1], p2, C_F4, ANG2)]:
         wn, R = p[:, 0], p[:, 1]
-        fit_two, _, _ = _fit_curve(wn, R, theta_two, sic_two_beam, angle)
-        fit_airy, _, _ = _fit_curve(wn, R, theta_airy, sic_airy, angle)
+        fit_two = _fit_gain(wn, R, theta_two, sic_two_beam, angle)
+        fit_airy = _fit_gain(wn, R, theta_airy, sic_airy, angle)
         ax.plot(wn, R, color=color, lw=0.7, alpha=0.8, label="实测（振荡）")
         ax.plot(wn, fit_two, color=C_TWO, lw=1.0, ls="--", label="双光束")
         ax.plot(wn, fit_airy, color=C_AIRY, lw=1.0, label="Airy")
         ax.set_ylabel("反射率振荡（%）")
-        ax.set_title(f"SiC 入射角 {angle:.0f}°：双光束 vs Airy 拟合（振荡口径）")
+        ax.set_title(f"碳化硅晶圆片 入射角 {angle:.0f}°：双光束 vs Airy 拟合（振荡口径）")
         ax.legend(loc="lower right", ncol=3)
     axes[1].set_xlabel("波数（cm-1）")
     fig.tight_layout()
@@ -263,10 +272,33 @@ def fig06_fit_sic(out_dir: Path, p1, p2, sic: dict) -> None:
 
 
 def fig07_residual_fft_sic(out_dir: Path, p1, sic: dict) -> None:
-    """SiC 双光束残差频谱（谐波检验）。"""
-    _fig_residual_fft(out_dir, p1, sic["two_beam"]["theta"], sic_two_beam,
+    """碳化硅晶圆片 双光束残差频谱（谐波检验）。"""
+    _fig_residual_fft(out_dir, p1, sic["two_beam"]["theta"], sic_two_beam, _fit_gain,
                       sic["f0"], sic["two_beam"]["harmonics"],
-                      "q3_fig07_residual_fft_sic", "SiC 双光束残差频谱")
+                      "q3_fig07_residual_fft_sic", "碳化硅晶圆片 双光束残差频谱")
+
+
+def fig08_sim_spectrum(out_dir: Path) -> None:
+    """仿真：衬底吸收 κ2 对反射光谱形状的影响（推导过程 §3.5，d=4 μm）。"""
+    nu = np.linspace(1000.0, 4000.0, 800)
+    n1 = _n1_si(nu)                       # 外延层固定 n1≈3.42（透明）
+    kappa_list = [0.0, 0.05, 0.20, 0.50]  # 衬底吸收（常数复 n2 简化口径）
+    colors = ["#1f77b4", "#ff7f0e", "#2ca02c", "#d62728"]
+
+    fig, ax = plt.subplots(figsize=(8, 5))
+    for k2, color in zip(kappa_list, colors):
+        n2 = 3.1 + 1j * k2
+        R = airy_reflectance_avg(nu, 4.0, 0.0, n1, n2, ANG1, N0)
+        ax.plot(nu, R, color=color, lw=1.6, label=rf"$\kappa_2 = {k2:g}$")
+    ax.set_xlim(1000.0, 4000.0)
+    ax.set_xlabel("波数（cm-1）")
+    ax.set_ylabel("反射率 $R$")
+    ax.set_title("衬底吸收 κ2 对反射光谱形状的影响（d=4 μm，θ=10°）")
+    ax.legend(loc="lower left")
+    fig.tight_layout()
+    fig.savefig(out_dir / "q3_fig08_sim_spectrum.png")
+    plt.close(fig)
+    print(f"save -> {out_dir.name}/q3_fig08_sim_spectrum.png")
 
 
 def fig08_sim_bias(out_dir: Path) -> None:
@@ -299,24 +331,35 @@ def fig08_sim_bias(out_dir: Path) -> None:
 
 
 def fig09_aic_compare(out_dir: Path, si: dict, sic: dict) -> None:
-    """双光束 vs Airy 的 AIC 对比（ΔAIC>10 判定多光束）。"""
-    labels = ["硅片(附件3/4)", "SiC(附件1/2)"]
-    two_aic = [si["two_beam"]["stats"]["AIC"], sic["two_beam"]["stats"]["AIC"]]
-    airy_aic = [si["airy"]["stats"]["AIC"], sic["airy"]["stats"]["AIC"]]
-    delta = [si["delta_aic"], sic["delta_aic"]]
-    x = np.arange(2)
-    w = 0.35
-    fig, ax = plt.subplots(figsize=(8, 4.8))
-    ax.bar(x - w / 2, two_aic, w, color=C_TWO, label="双光束")
-    ax.bar(x + w / 2, airy_aic, w, color=C_AIRY, label="Airy")
-    for xi in x:
-        lo = min(two_aic[xi], airy_aic[xi])
-        ax.text(xi, lo, f"ΔAIC={delta[xi]:.0f}", ha="center", va="top", fontsize=9)
-    ax.set_xticks(x)
-    ax.set_xticklabels(labels)
-    ax.set_ylabel("AIC")
-    ax.set_title("双光束 vs Airy 的 AIC 对比（ΔAIC>10 判定多光束）")
-    ax.legend(loc="lower right")
+    """双光束 vs Airy 的 -AIC 对比（-AIC 越大模型越优，ΔAIC>10 判定多光束）。
+
+    AIC 绝对值跨数据集不可比（硅晶圆片为绝对反射率口径、碳化硅晶圆片 为振荡项口径，
+    两者 n_data 与残差量纲均不同），故拆成左右两子图、各自独立 y 轴；
+    取 -AIC 使柱状图朝上，且 y 轴按本组数据范围截断缩放。
+    """
+    groups = [("硅晶圆片（附件3/4）", si), ("碳化硅晶圆片（附件1/2）", sic)]
+    fig, axes = plt.subplots(1, 2, figsize=(11, 4.8))
+    w = 0.45
+    for ax, (label, g) in zip(axes, groups):
+        two = -g["two_beam"]["stats"]["AIC"]
+        airy = -g["airy"]["stats"]["AIC"]
+        delta = g["delta_aic"]          # AIC_two - AIC_airy，正=Airy 更优
+        ax.bar([-0.25], [two], w, color=C_TWO, label="双光束")
+        ax.bar([0.25], [airy], w, color=C_AIRY, label="Airy")
+        lo = min(two, airy)
+        hi = max(two, airy)
+        pad = abs(hi - lo) * 1.6 + 1.0
+        ax.set_ylim(lo - pad, hi + pad)
+        for xi, val in zip([-0.25, 0.25], [two, airy]):
+            ax.text(xi, val, f"{val:.1f}", ha="center", va="bottom", fontsize=8)
+        ax.text(0.0, hi + pad * 0.35, f"ΔAIC={delta:+.1f}",
+                ha="center", va="center", fontsize=10, fontweight="bold")
+        ax.set_xticks([-0.25, 0.25])
+        ax.set_xticklabels(["双光束", "Airy"])
+        ax.set_xlim(-0.7, 0.7)
+        ax.set_ylabel("-AIC")
+        ax.set_title(f"{label}  -AIC 对比")
+        ax.legend(loc="best")
     fig.tight_layout()
     fig.savefig(out_dir / "q3_fig09_aic_compare.png")
     plt.close(fig)
@@ -325,20 +368,30 @@ def fig09_aic_compare(out_dir: Path, si: dict, sic: dict) -> None:
 
 def fig10_thickness(out_dir: Path, si: dict, sic: dict) -> None:
     """双光束 vs Airy 的厚度对比与修正量。"""
-    fig, axes = plt.subplots(1, 2, figsize=(10, 4.5))
-    for ax, d, label in [(axes[0], si, "硅片（附件3/4）"),
-                         (axes[1], sic, "SiC（附件1/2）")]:
+    fig, axes = plt.subplots(1, 2, figsize=(11, 4.5))
+    w = 0.45
+    for ax, d, label in [(axes[0], si, "硅晶圆片（附件3/4）"),
+                         (axes[1], sic, "碳化硅晶圆片（附件1/2）")]:
         d2 = d["two_beam"]["theta"][0]
         da = d["airy"]["theta"][0]
         dd = da - d2
-        names = ["双光束", "Airy"]
         vals = [d2, da]
-        bars = ax.bar(names, vals, color=[C_TWO, C_AIRY], width=0.5)
-        for b, v in zip(bars, vals):
-            ax.text(b.get_x() + b.get_width() / 2, v, f"{v:.4f}",
-                    ha="center", va="bottom", fontsize=9)
+        ax.bar([-0.25], [d2], w, color=C_TWO, label="双光束")
+        ax.bar([0.25], [da], w, color=C_AIRY, label="Airy")
+        lo = min(d2, da)
+        hi = max(d2, da)
+        pad = abs(hi - lo) * 1.6
+        ax.set_ylim(lo - pad, hi + pad)
+        for xi, val in zip([-0.25, 0.25], vals):
+            ax.text(xi, val, f"{val:.4f}", ha="center", va="bottom", fontsize=8)
+        ax.text(0.0, hi + pad * 0.35, f"Δd={dd * 1000:+.1f} nm",
+                ha="center", va="center", fontsize=10, fontweight="bold")
+        ax.set_xticks([-0.25, 0.25])
+        ax.set_xticklabels(["双光束", "Airy"])
+        ax.set_xlim(-0.7, 0.7)
         ax.set_ylabel("厚度 d（μm）")
-        ax.set_title(f"{label}\n修正量 Δd={dd:+.4f} μm")
+        ax.set_title(label)
+        ax.legend(loc="best")
     fig.tight_layout()
     fig.savefig(out_dir / "q3_fig10_thickness.png")
     plt.close(fig)
@@ -353,7 +406,7 @@ def main() -> None:
     out_dir.mkdir(parents=True, exist_ok=True)
 
     print("=" * 56)
-    print("Q3 生图：outputs/figures/q3/（多光束判定 + 硅片/SiC 反演）")
+    print("Q3 生图：outputs/figures/q3/（多光束判定 + 硅晶圆片/碳化硅晶圆片 反演）")
     print("=" * 56)
 
     # 原始光谱
@@ -381,11 +434,12 @@ def main() -> None:
     fig05_residual_fft_silicon(out_dir, p3, si)
     fig06_fit_sic(out_dir, p1, p2, sic)
     fig07_residual_fft_sic(out_dir, p1, sic)
+    fig08_sim_spectrum(out_dir)
     fig08_sim_bias(out_dir)
     fig09_aic_compare(out_dir, si, sic)
     fig10_thickness(out_dir, si, sic)
 
-    print("完成。12 张图已输出到 outputs/figures/q3/。")
+    print("完成。14 张图已输出到 outputs/figures/q3/。")
 
 
 if __name__ == "__main__":

@@ -40,25 +40,63 @@ def n_sellmeier1(nu: np.ndarray, B: float, C: float) -> np.ndarray:
     return np.sqrt(np.maximum(1.0 + B * lam2 / denom, 1e-8))
 
 
-# 菲涅尔振幅反射系数
-def fresnel_r(n_inc, n_exit, theta_inc: float):
-    """两介质界面的振幅反射系数（s/p 偏振）。
+def n_drude(nu: np.ndarray, n_inf: float, wp: float, gamma: float) -> np.ndarray:
+    """Drude 复折射率（重掺杂半导体自由载流子响应）。
+
+    自由载流子对介电函数的贡献用 Drude 模型描述，本函数直接以波数为自变量：
+
+        n²(ν) = n_inf² − wp² / (ν² + i·γ·ν)
 
     参数
     ----
-    n_inc / n_exit : 入射侧 / 出射侧折射率（可为数组）
+    nu    : 波数数组（cm⁻¹）
+    n_inf : 高频极限折射率（ω→∞ 时 ε_inf 的开方，接近本征半导体折射率）
+    wp    : 等离子波数（cm⁻¹），满足 ω_p = 2πc·wp，与载流子浓度 N 成正比
+    gamma : 碰撞波数（cm⁻¹），满足 γ_coll = 2πc·gamma，与迁移率成反比
+
+    返回
+    ----
+    复数折射率 n(ν) = n'(ν) + i·κ(ν)，随波数变化。ν→∞ 时 n→n_inf；
+    低波数（长波）端自由载流子使 n' 下降、κ 上升，体现衬底的重掺杂色散。
+    """
+    nu = np.asarray(nu, float)
+    eps = n_inf ** 2 - wp ** 2 / (nu ** 2 + 1j * gamma * nu)
+    return np.sqrt(eps)
+
+
+# 菲涅尔振幅反射系数
+def fresnel_r(n_inc, n_exit, theta_inc: float):
+    """两介质界面的振幅反射系数（s/p 偏振），支持复折射率。
+
+    参数
+    ----
+    n_inc / n_exit : 入射侧 / 出射侧折射率（可为数组，可为复数）
     theta_inc      : 入射角（弧度，标量）
 
-    返回 (rs, rp)。
+    返回 (rs, rp)。用光学导纳形式 η_s = n·cosθ、η_p = n/cosθ，
+    cosθ_j = sqrt(1 − (n_inc sinθ_inc / n_j)²)，对复折射率自动取复分支。
     """
-    n_inc = np.asarray(n_inc, float)
-    n_exit = np.asarray(n_exit, float)
-    ratio = np.minimum(n_inc * np.sin(theta_inc) / np.maximum(n_exit, 1e-12), 1.0)
-    theta_exit = np.arcsin(ratio)
+    n_inc = np.asarray(n_inc)
+    n_exit = np.asarray(n_exit)
+    is_cplx = np.iscomplexobj(n_inc) or np.iscomplexobj(n_exit)
+    if is_cplx:
+        n_inc = n_inc.astype(complex)
+        n_exit = n_exit.astype(complex)
+        sin_e = n_inc * np.sin(theta_inc) / n_exit
+        cos_e = np.sqrt(1.0 - sin_e ** 2)
+    else:
+        n_inc = n_inc.astype(float)
+        n_exit = n_exit.astype(float)
+        ratio = np.minimum(n_inc * np.sin(theta_inc) / np.maximum(n_exit, 1e-12), 1.0)
+        sin_e = ratio
+        cos_e = np.sqrt(1.0 - sin_e ** 2)
     cos_i = np.cos(theta_inc)
-    cos_e = np.cos(theta_exit)
-    rs = (n_inc * cos_i - n_exit * cos_e) / (n_inc * cos_i + n_exit * cos_e)
-    rp = (n_exit * cos_i - n_inc * cos_e) / (n_exit * cos_i + n_inc * cos_e)
+    eta_inc_s = n_inc * cos_i
+    eta_exit_s = n_exit * cos_e
+    eta_inc_p = n_inc / cos_i
+    eta_exit_p = n_exit / cos_e
+    rs = (eta_inc_s - eta_exit_s) / (eta_inc_s + eta_exit_s)
+    rp = (eta_exit_p - eta_inc_p) / (eta_exit_p + eta_inc_p)
     return rs, rp
 
 
@@ -133,6 +171,9 @@ def theory_R(nu: np.ndarray, d_um: float, beta: np.ndarray, theta0_deg: float,
         n1 = n_sellmeier(nu, *beta)
     elif model == "sellmeier1":
         n1 = n_sellmeier1(nu, *beta)
+    elif model == "airy_sellmeier1":
+        n1 = n_sellmeier1(nu, *beta)
+        return airy_reflectance_osc(nu, d_um, n1, n2, theta0_deg, n0)
     else:
         raise ValueError(f"未知模型: {model}")
     return theory_osc(nu, d_um, n1, theta0_deg, n2, n0)
@@ -219,15 +260,23 @@ def airy_reflectance_avg(nu, d_um, sigma_d, n1, n2, theta0_deg, n0=1.0,
 
 
 def airy_reflectance_osc(nu, d_um, n1, n2, theta0_deg, n0=1.0):
-    """多光束 Airy 反射率的振荡部分（%）= 完整 Airy 反射率 − 带内均值。
+    """多光束 Airy 反射率的振荡部分（%）= 完整 Airy 反射率 − 解析 DC 项。
 
-    与 theory_osc（双光束振荡项）同口径：去掉慢变 DC 后仅保留干涉振荡，
-    用于问题三中双光束与多光束在"振荡项"口径下的公平 AIC/BIC 对比。
-    带内含多个条纹周期，带内均值近似等于相位平均 DC，剩余 DC 由每角度
-    线性校正 (a, b) 的 b 项吸收，不影响比较。
+    与 theory_osc（双光束振荡项）严格同口径：theory_osc 减去的是解析 DC
+    ``r01² + (1-r01²)² r12²``（随色散在带内缓慢变化，与 AsLS 去基线口径一致）。
+    若本函数只减常数带内均值，色散导致的 DC 变化会残留进"振荡项"，造成
+    双光束/多光束对比不公平（多光束被高估振荡幅度）。故这里减去同一解析
+    DC 项，使两者仅差"多光束高阶项"，供 AIC/BIC 公平对比。
     """
     R = airy_reflectance(nu, d_um, n1, n2, theta0_deg, n0)
-    return R - float(np.mean(R))
+    nu_arr = np.asarray(nu, float)
+    theta0 = np.deg2rad(theta0_deg)
+    theta1 = np.arcsin(np.minimum(n0 * np.sin(theta0) / np.asarray(n1, float), 1.0))
+    rs01, rp01 = fresnel_r(n0, n1, theta0)
+    rs12, rp12 = fresnel_r(n1, n2, theta1)
+    dc = ((rs01 ** 2 + (1 - rs01 ** 2) ** 2 * rs12 ** 2)
+          + (rp01 ** 2 + (1 - rp01 ** 2) ** 2 * rp12 ** 2)) / 2.0
+    return R - dc * 100.0
 
 
 def two_beam_reflectance_avg(nu, d_um, sigma_d, n1, n2, theta0_deg, n0=1.0,

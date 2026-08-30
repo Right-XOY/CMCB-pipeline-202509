@@ -24,9 +24,10 @@ import yaml
 from scipy.optimize import differential_evolution, least_squares
 
 from preprocess import (find_cutoff_stft, hampel_filter, load_spectra,
-                        resample, sg_smooth)
+                        resample, sg_smooth, preprocess)
 from models import airy_reflectance_avg, n_cauchy, two_beam_reflectance_avg
-from fitting import fft_init_d, fit_statistics, parameter_uncertainty
+from fitting import (de_init_beta, fft_init_d, fit_statistics,
+                     parameter_uncertainty, profile_scan_d)
 
 # 物理常量与入射角
 N0 = 1.0
@@ -57,17 +58,19 @@ TWO_BOUNDS = [(0.5, 200.0), (2.5, 3.6), (0.0, 0.5)]
 TWO_DE_BOUNDS = [(2.5, 3.6), (0.0, 0.5)]
 TWO_X0 = [3.1, 0.1]
 
-# 碳化硅（附件 1/2）：n1 用 Cauchy 色散（SiC 红外色散显著），衬底 n2 固定
-N2_SIC = 2.65                # SiC 衬底折射率（问题二固定，红外区近似平稳）
+# 碳化硅（附件 1/2）：与问题二同口径 —— AsLS 去基线拟合振荡项，衬底 n2 固定
 SIC_CUTOFF_FALLBACK = 1000.0  # STFT 定界失效时的回退裁剪点（cm⁻¹）
+N2_SIC = 2.65                 # SiC 衬底折射率（问题二固定值，选定带宽内近似平稳）
+SIC_PREPROC = dict(hampel_win=11, hampel_t=3.0, asls_lam=1e5, asls_p=0.01,
+                   sg_win=15, sg_poly=3)
 
-# SiC 双光束 / Airy 参数 θ = [d, A, B, C, sigma_d]
-#   n1(ν) = A + B/λ² + C/λ⁴（Cauchy，λ 单位 μm）
-#   n2 = N2_SIC（衬底半绝缘、近似无吸收，实数）
-#   双光束与 Airy 参数完全相同，仅差多光束高阶项（谐波），供 AIC/BIC 公平对比
-SIC_NAMES = ["d(um)", "A", "B", "C", "sigma_d(um)"]
+# SiC 双光束 / Airy 参数（与问题二同口径：n2 固定 2.65，θ 均为 [d, A, B, C]）
+#   双光束 = theory_osc（一阶振荡项）；Airy = 完整 Airy 振荡项（含多光束高阶项）
+#   两者参数相同、n2 相同，仅差"多光束高阶项"，供 AIC/BIC 公平对比
+#   n1(ν) = A + B/λ² + C/λ⁴（Cauchy，λ 单位 μm；边界同问题二 cauchy）
+SIC_NAMES_TWO = ["d(um)", "A", "B", "C"]
+SIC_NAMES_AIRY = ["d(um)", "A", "B", "C"]
 SIC_CAUCHY_BOUNDS = [(1.5, 3.5), (-1.0, 1.0), (-1.0, 1.0)]
-SIC_SD_BOUND = (0.0, 0.5)
 
 SEED = 2025
 
@@ -137,20 +140,6 @@ def airy_R(nu, theta_deg, theta) -> np.ndarray:
 def twobeam_R(nu, theta_deg, theta) -> np.ndarray:
     d, n2, sd = theta
     return two_beam_reflectance_avg(nu, d, sd, N1_SI, n2, theta_deg, N0)
-
-
-# SiC 双光束模型（Cauchy 色散 n1 + 厚度平均，衬底 n2 固定）：θ = [d, A, B, C, sigma_d]
-def twobeam_R_sic(nu, theta_deg, theta) -> np.ndarray:
-    d, A, B, C, sd = theta
-    n1 = n_cauchy(nu, A, B, C)
-    return two_beam_reflectance_avg(nu, d, sd, n1, N2_SIC, theta_deg, N0)
-
-
-# SiC Airy 模型（Cauchy 色散 n1 + 厚度平均，衬底 n2 固定）：θ = [d, A, B, C, sigma_d]
-def airy_R_sic(nu, theta_deg, theta) -> np.ndarray:
-    d, A, B, C, sd = theta
-    n1 = n_cauchy(nu, A, B, C)
-    return airy_reflectance_avg(nu, d, sd, n1, N2_SIC, theta_deg, N0)
 
 
 def _lin_solve(T: np.ndarray, R: np.ndarray) -> tuple[float, float]:
@@ -280,25 +269,27 @@ def solve_silicon(wn1, R1, wn2, R2, d0, seed=SEED) -> dict:
 
 
 def solve_sic(wn1, R1, wn2, R2, d0, seed=SEED) -> dict:
-    """对 SiC 做双光束 + Airy 双模型反演与多光束判定（与硅片同一套判据）。
+    """对 SiC 做双光束 + Airy 双模型反演与多光束判定（与问题二同口径）。
 
-    SiC 外延层 n1 用 Cauchy 色散（λ∈[2.5,6.4] μm 内 n1≈2.5~2.7），衬底 n2 固定；
-    双光束与 Airy 参数完全相同，仅差多光束高阶项，供 AIC/BIC 公平对比。
-    厚度边界按 FFT 初值 d0 收窄到 [d0-2, d0+2]，避免多周期分支跳变。
+    SiC 外延层 n1 用 Cauchy 色散，衬底 n2 固定 2.65（问题二值）；双光束用
+    一阶振荡项 theory_osc，Airy 用完整多光束振荡项，两者参数均为 [d,A,B,C]、
+    n2 相同，仅差多光束高阶项，供 AIC/BIC 公平对比。厚度边界按 FFT 初值 d0
+    收窄到 [d0-0.5, d0+0.5]，避免分支跳变（同问题二剖面扫描口径）。
     """
-    n_lin = 4  # 双角度各 (a, b) 线性校正参数，闭式消元
-    d_lo, d_hi = max(0.5, d0 - 2.0), d0 + 2.0
-    sic_bounds = [(d_lo, d_hi)] + list(SIC_CAUCHY_BOUNDS) + [SIC_SD_BOUND]
-    sic_de_bounds = list(SIC_CAUCHY_BOUNDS) + [SIC_SD_BOUND]
+    d_half, step = 0.5, 0.01
+    bounds = [(max(0.5, d0 - d_half), d0 + d_half)] + list(SIC_CAUCHY_BOUNDS)
 
-    # 1) 双光束拟合（判定基准 + 残差谐波）
-    res_two, _ = fit_model(wn1, R1, wn2, R2, d0, twobeam_R_sic,
-                           sic_bounds, sic_de_bounds, seed)
-    theta_two = res_two.x
-    d_two, A2, B2, C2, sd_two = theta_two
-    n1_ = len(wn1)
-    r_two1 = res_two.fun[:n1_]
-    stats_two = fit_statistics(res_two, len(theta_two) + n_lin, R1, R2)
+    # 1) 双光束（Q2 cauchy 口径：theory_osc + Cauchy n1，n2 固定 2.65）
+    beta0_two = de_init_beta(wn1, R1, wn2, R2, d0, "cauchy", N2_SIC, ANGLES,
+                             SIC_CAUCHY_BOUNDS, seed=seed)
+    fit_two, prof_two = profile_scan_d(wn1, R1, wn2, R2, d0, beta0_two, "cauchy",
+                                       N2_SIC, ANGLES, bounds, d_half=d_half,
+                                       step=step, seed=seed)
+    theta_two = fit_two.theta.tolist()
+    d_two = float(fit_two.d)
+    A2, B2, C2 = [float(v) for v in fit_two.beta]
+    stats_two = fit_statistics(fit_two.res, fit_two.res.x.size + fit_two.n_lin, R1, R2)
+    r_two1 = fit_two.residual1
     # 主频用带内平均相位折射率近似（色散使 f0 微展宽，仅作谐波定位）
     n1m = float(n_cauchy(wn1, A2, B2, C2).mean())
     th1 = np.arcsin(np.sin(np.deg2rad(ANG1)) / n1m)
@@ -306,14 +297,19 @@ def solve_sic(wn1, R1, wn2, R2, d0, seed=SEED) -> dict:
     harm_two = residual_harmonics(wn1, r_two1, f0)
     rho_two = rho_estimate(n1m, N2_SIC)
 
-    # 2) Airy 拟合（同参数，仅多光束高阶项不同）
-    res_airy, _ = fit_model(wn1, R1, wn2, R2, d0, airy_R_sic,
-                            sic_bounds, sic_de_bounds, seed)
-    theta_airy = res_airy.x
-    d_airy, Aa, Ba, Ca, sd_airy = theta_airy
-    r_airy1 = res_airy.fun[:n1_]
-    stats_airy = fit_statistics(res_airy, len(theta_airy) + n_lin, R1, R2)
-    sd_a, ci_a, _ = parameter_uncertainty(res_airy, SIC_NAMES, n_lin=n_lin)
+    # 2) Airy（Q2 同口径：airy_reflectance_osc + Cauchy n1，仅多光束高阶项不同）
+    beta0_airy = de_init_beta(wn1, R1, wn2, R2, d0, "airy", N2_SIC, ANGLES,
+                              SIC_CAUCHY_BOUNDS, seed=seed)
+    fit_airy, prof_airy = profile_scan_d(wn1, R1, wn2, R2, d0, beta0_airy, "airy",
+                                         N2_SIC, ANGLES, bounds, d_half=d_half,
+                                         step=step, seed=seed)
+    theta_airy = fit_airy.theta.tolist()
+    d_airy = float(fit_airy.d)
+    Aa, Ba, Ca = [float(v) for v in fit_airy.beta]
+    stats_airy = fit_statistics(fit_airy.res, fit_airy.res.x.size + fit_airy.n_lin, R1, R2)
+    r_airy1 = fit_airy.residual1
+    sd_beta, ci_beta, _ = parameter_uncertainty(fit_airy.res, ["A", "B", "C"],
+                                                n_lin=fit_airy.n_lin)
     n1ma = float(n_cauchy(wn1, Aa, Ba, Ca).mean())
     th1a = np.arcsin(np.sin(np.deg2rad(ANG1)) / n1ma)
     f0_airy = 2.0 * n1ma * d_airy * np.cos(th1a) / 1e4
@@ -323,15 +319,18 @@ def solve_sic(wn1, R1, wn2, R2, d0, seed=SEED) -> dict:
     return {
         "d0": d0,
         "two_beam": {
-            "theta": theta_two.tolist(), "names": SIC_NAMES,
+            "theta": theta_two, "names": SIC_NAMES_TWO,
             "stats": stats_two, "rho": rho_two,
             "harmonics": {str(k): v for k, v in harm_two.items()},
+            "d_ci": prof_two["d_ci"], "d_std": prof_two["std_d"],
         },
         "airy": {
-            "theta": theta_airy.tolist(), "names": SIC_NAMES,
+            "theta": theta_airy, "names": SIC_NAMES_AIRY,
             "stats": stats_airy, "rho": rho_airy,
             "harmonics": {str(k): v for k, v in harm_airy.items()},
-            "sd": sd_a.tolist(), "ci": ci_a.tolist(),
+            "d_ci": prof_airy["d_ci"], "d_std": prof_airy["std_d"],
+            "sd": [prof_airy["std_d"]] + sd_beta.tolist(),
+            "ci": [prof_airy["d_ci"]] + ci_beta.tolist(),
         },
         "f0": f0,
         "delta_aic": stats_two["AIC"] - stats_airy["AIC"],
@@ -387,22 +386,25 @@ def main() -> None:
 
     save_json(result_dir / "q3_silicon.json", si)
 
-    # 4. SiC 双模型反演与判定（附件1/2，同一套判据）
+    # 4. SiC 双模型反演与判定（附件1/2，与问题二同口径）
     print("\n[4] SiC wafer (f1/f2): two-beam vs Airy inversion & decision")
     spec_sic = {}
     for key, path in [("f1", raw["f1"]), ("f2", raw["f2"])]:
         wn, R = load_spectra(root / path)
-        wn_p, R_p, cutoff = preprocess_sic(wn, R)
+        wn_p, R_p, cutoff, _, _ = preprocess(wn, R, **SIC_PREPROC)
+        # 裁剪分界点合理性防护（同问题二）：异常时回退默认 1000 cm⁻¹
+        if not (700.0 <= cutoff <= 1600.0):
+            cutoff = 1000.0
+            wn_p, R_p, _, _, _ = preprocess(wn, R, cutoff=cutoff, **SIC_PREPROC)
         spec_sic[key] = (wn_p, R_p)
         print(f"  {key}: {len(wn)} pts -> cutoff {cutoff:.1f} cm-1 -> {len(wn_p)} pts")
         save_csv(result_dir / f"q3_processed_{key}.csv",
-                 "wavenumber_cm-1,reflectance_%", [wn_p, R_p])
+                 "wavenumber_cm-1,reflectance_osc_%", [wn_p, R_p])
 
     wn1s, R1s = spec_sic["f1"]
     wn2s, R2s = spec_sic["f2"]
-    # FFT 厚度初值：先去慢变背景再取主频（SiC 背景漂移幅度大于条纹，见 detrend_poly）
-    d0s = fft_init_d(wn1s, detrend_poly(wn1s, R1s), n_avg=2.6,
-                     theta0_deg=ANG1, search_lo=1500.0)
+    # FFT 厚度初值（R1s 已是 AsLS 去基线后的振荡项，同问题二，无需再 detrend）
+    d0s = fft_init_d(wn1s, R1s, n_avg=2.6, theta0_deg=ANG1, search_lo=1500.0)
     print(f"  d0 = {d0s:.3f} um")
 
     sic = solve_sic(wn1s, R1s, wn2s, R2s, d0s)

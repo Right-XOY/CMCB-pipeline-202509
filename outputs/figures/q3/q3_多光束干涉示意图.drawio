@@ -1,12 +1,9 @@
 <mxfile host="Electron" agent="codex">
   <diagram id="q3-multibeam" name="q3多光束干涉示意图">
-    <mxGraphModel dx="1522" dy="1098" grid="1" gridSize="1" guides="1" tooltips="1" connect="1" arrows="1" fold="1" page="1" pageScale="1" pageWidth="1450" pageHeight="820" math="0" shadow="0">
+    <mxGraphModel dx="1296" dy="979" grid="1" gridSize="1" guides="1" tooltips="1" connect="1" arrows="1" fold="1" page="1" pageScale="1" pageWidth="1450" pageHeight="820" math="0" shadow="0">
       <root>
         <mxCell id="0" />
         <mxCell id="1" parent="0" />
-        <mxCell id="title" parent="1" style="text;html=1;align=center;verticalAlign=middle;fontSize=18;fontStyle=1;" value="空气–外延层–衬底多光束干涉示意图" vertex="1">
-          <mxGeometry height="36" width="700" x="375" y="24" as="geometry" />
-        </mxCell>
         <mxCell id="outer" parent="1" style="rounded=0;whiteSpace=wrap;html=1;fillColor=none;strokeColor=#000000;strokeWidth=3;" vertex="1">
           <mxGeometry height="570" width="1100" x="179" y="50" as="geometry" />
         </mxCell>
@@ -210,9 +207,6 @@
         </mxCell>
         <mxCell id="dLabel" parent="1" style="text;html=1;align=left;verticalAlign=middle;fontSize=15;fontStyle=2;" value="&lt;font style=&quot;font-size: 23px;&quot;&gt;d&lt;/font&gt;" vertex="1">
           <mxGeometry height="24" width="30" x="1230" y="378" as="geometry" />
-        </mxCell>
-        <mxCell id="note" parent="1" style="text;html=1;align=right;verticalAlign=middle;fontSize=10;fontColor=#888888;" value="示意图未按实际比例" vertex="1">
-          <mxGeometry height="22" width="250" x="1180" y="752" as="geometry" />
         </mxCell>
         <mxCell id="rpiQyBv969TxzhT0wmHP-6" parent="1" style="text;html=1;align=left;verticalAlign=middle;fontSize=15;fontStyle=2;" value="&lt;span style=&quot;font-size: 23px;&quot;&gt;厚度&lt;/span&gt;" vertex="1">
           <mxGeometry height="24" width="30" x="1140" y="378" as="geometry" />

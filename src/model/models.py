@@ -126,6 +126,9 @@ def theory_R(nu: np.ndarray, d_um: float, beta: np.ndarray, theta0_deg: float,
     beta = np.asarray(beta, float)
     if model == "cauchy":
         n1 = n_cauchy(nu, *beta)
+    elif model == "airy":
+        n1 = n_cauchy(nu, *beta)
+        return airy_reflectance_osc(nu, d_um, n1, n2, theta0_deg, n0)
     elif model == "sellmeier":
         n1 = n_sellmeier(nu, *beta)
     elif model == "sellmeier1":
@@ -213,6 +216,18 @@ def airy_reflectance_avg(nu, d_um, sigma_d, n1, n2, theta0_deg, n0=1.0,
         d_i = d_um + np.sqrt(2.0) * sigma_d * xi
         R = R + wi * airy_reflectance(nu, d_i, n1, n2, theta0_deg, n0)
     return R / np.sqrt(np.pi)
+
+
+def airy_reflectance_osc(nu, d_um, n1, n2, theta0_deg, n0=1.0):
+    """多光束 Airy 反射率的振荡部分（%）= 完整 Airy 反射率 − 带内均值。
+
+    与 theory_osc（双光束振荡项）同口径：去掉慢变 DC 后仅保留干涉振荡，
+    用于问题三中双光束与多光束在"振荡项"口径下的公平 AIC/BIC 对比。
+    带内含多个条纹周期，带内均值近似等于相位平均 DC，剩余 DC 由每角度
+    线性校正 (a, b) 的 b 项吸收，不影响比较。
+    """
+    R = airy_reflectance(nu, d_um, n1, n2, theta0_deg, n0)
+    return R - float(np.mean(R))
 
 
 def two_beam_reflectance_avg(nu, d_um, sigma_d, n1, n2, theta0_deg, n0=1.0,

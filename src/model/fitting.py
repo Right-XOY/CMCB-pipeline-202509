@@ -197,12 +197,14 @@ def parameter_uncertainty(res, param_names: list[str], n_lin: int = 0
 def noise_robustness_test(wn1, R1, wn2, R2, model: str, n2: float, angles,
                           bounds, de_bounds,
                           levels=(0.01, 0.02, 0.05), nrep: int = 5,
-                          seed: int = 0, search_lo: float = 1500.0) -> dict:
+                          seed: int = 0, search_lo: float = 1500.0,
+                          profile_step: float = 0.05, d_half: float = 0.5) -> dict:
     """向实测谱加入不同等级高斯噪声，每次重新走完整反演流程。
 
-    完整反演 = FFT 估 d0 → DE 搜色散初值 → L-M 联合拟合（与主流程同口径）。
-    L-M 固定厚度 d0（fix_d），只优化色散系数，避免多周期分支跳变。
-    因此 d_mean/d_std 反映算法在含噪数据上的真实估计能力。
+    完整反演 = FFT 估 d0 → DE 搜色散初值 → 剖面扫描精调 d（与主流程同口径）。
+    剖面扫描在 d0 邻域 [d0−d_half, d0+d_half] 内固定 d、仅优化色散系数，
+    取 SSE 最小者并排除反相非物理解，因此两模型各自给出独立的最优 d。
+    抗噪测试用较粗步长（profile_step）以控制计算量。
     噪声 σ_n = eta · std(R_obs)。
     """
     rng = np.random.default_rng(seed)
@@ -210,15 +212,16 @@ def noise_robustness_test(wn1, R1, wn2, R2, model: str, n2: float, angles,
     for eta in levels:
         ds = []
         for rep in range(nrep):
-            n1 = rng.normal(0.0, eta * R1.std(), R1.shape)
-            n2 = rng.normal(0.0, eta * R2.std(), R2.shape)
-            R1n, R2n = R1 + n1, R2 + n2
+            eps1 = rng.normal(0.0, eta * R1.std(), R1.shape)
+            eps2 = rng.normal(0.0, eta * R2.std(), R2.shape)
+            R1n, R2n = R1 + eps1, R2 + eps2
             d0n = fft_init_d(wn1, R1n, n_avg=2.6,
                              theta0_deg=angles[0], search_lo=search_lo)
             beta0n = de_init_beta(wn1, R1n, wn2, R2n, d0n, model, n2, angles,
                                   de_bounds, seed=seed + rep)
-            fit = lm_fit(wn1, R1n, wn2, R2n, d0n, beta0n, model, n2, angles,
-                         bounds, seed=seed + rep, fix_d=True)
+            fit, _ = profile_scan_d(wn1, R1n, wn2, R2n, d0n, beta0n, model, n2,
+                                    angles, bounds, d_half=d_half,
+                                    step=profile_step, seed=seed + rep)
             ds.append(fit.d)
         out[str(eta)] = {"d_mean": float(np.mean(ds)), "d_std": float(np.std(ds)),
                          "d_min": float(np.min(ds)), "d_max": float(np.max(ds))}
@@ -233,3 +236,106 @@ def single_angle_cross_check(wn1, R1, wn2, R2, d0: float, beta0: np.ndarray,
     fit1 = lm_fit(wn1, R1, None, None, d0, beta0, model, n2, angles, bounds, seed=seed)
     fit2 = lm_fit(wn2, R2, None, None, d0, beta0, model, n2, angles, bounds, seed=seed)
     return {"d_angle1": float(fit1.d), "d_angle2": float(fit2.d)}
+
+
+# 剖面扫描精调厚度 d
+def profile_scan_d(wn1, R1, wn2, R2, d0: float, beta0: np.ndarray, model: str,
+                   n2: float, angles, bounds, d_half: float = 0.5,
+                   step: float = 0.01, seed: int = 0) -> tuple[FitResult, dict]:
+    """剖面扫描精调厚度 d（profile fitting）。
+
+    对 d 在 [d0−d_half, d0+d_half] 内等距扫描，每个候选 d 固定、仅优化色散
+    系数 β（线性 a,b 闭式消元），取 SSE 最小的 d 作为最优厚度估计。
+
+    与"L-M 联合优化 [d, β]"相比，本方法等价于求 profile 目标函数的最小值：
+    - 保留 d 的精调能力（d 参与选择，只是以扫描而非梯度方式）；
+    - 把 d 锁在 FFT 确定的正确分支内，避免多周期目标函数导致的跳变。
+
+    物理约束：线性增益 a 必须为正。振荡项 R_osc = C_phys·cos(δ)，系数
+    C_phys ∝ r01·r12 > 0（n0<n1<n2 时两反射系数同号），故理论振荡与实测
+    振荡必须同相，a<0 对应"反相"非物理解（或色散参数使理论幅度趋近 0 的
+    奇点），予以排除。凡任一角度 a<=0 的候选 d 置 SSE=inf。
+
+    返回 (最优 FitResult, profile 字典)。profile 含扫描轨迹与 d 的置信区间：
+      d_grid / sse / sse_min / d_opt / d_ci(lo,hi) / std_d
+    d 的 95% CI 由 SSE(d) 在最小值的曲率（Gauss-Newton 近似）给出：
+      std_d = sqrt(σ̂² / a2)，a2 为 SSE(d) 抛物线拟合的二次项系数。
+    """
+    d_grid = np.arange(d0 - d_half, d0 + d_half + step * 0.5, step)
+    sse = np.full_like(d_grid, np.inf)
+    best_fit = None
+    best_sse = np.inf
+    cur_beta = beta0
+    for i, d in enumerate(d_grid):
+        fit = lm_fit(wn1, R1, wn2, R2, float(d), cur_beta, model, n2, angles,
+                     bounds, seed=seed, fix_d=True)
+        # 物理约束：线性增益 a 必须为正，排除反相分支/奇点
+        if any(v[0] <= 0.0 for v in fit.linear.values()):
+            continue
+        sse[i] = float(np.sum(fit.res.fun ** 2))
+        if sse[i] < best_sse:
+            best_sse = sse[i]
+            best_fit = fit
+            cur_beta = fit.beta   # 用当前最优 β 作为下一点初值，加速收敛
+
+    # 全范围均反相时的回退：取 SSE 最小者（不施加正增益约束）
+    if best_fit is None:
+        best_fit = lm_fit(wn1, R1, wn2, R2, float(d0), beta0, model, n2,
+                          angles, bounds, seed=seed, fix_d=True)
+        sse[:] = float(np.sum(best_fit.res.fun ** 2))
+        best_sse = sse[0]
+        d_opt = float(d0)
+    else:
+        # 抛物线细化：亚网格步长定位 SSE 最小值对应的 d
+        valid = np.isfinite(sse)
+        k = int(np.argmin(np.where(valid, sse, np.inf)))
+        if 0 < k < len(d_grid) - 1 and np.isfinite(sse[k-1]) and np.isfinite(sse[k+1]):
+            y0, y1, y2 = sse[k - 1], sse[k], sse[k + 1]
+            denom = y0 - 2.0 * y1 + y2
+            if abs(denom) > 1e-15:
+                d_opt = d_grid[k] + 0.5 * step * (y0 - y2) / denom
+            else:
+                d_opt = d_grid[k]
+        else:
+            d_opt = d_grid[k]
+        # 在 d_opt 处用最优 β 做一次最终拟合
+        final_fit = lm_fit(wn1, R1, wn2, R2, float(d_opt), cur_beta, model, n2,
+                           angles, bounds, seed=seed, fix_d=True)
+        if all(v[0] > 0.0 for v in final_fit.linear.values()):
+            best_fit = final_fit
+
+    sse_min = float(np.sum(best_fit.res.fun ** 2))
+
+    # d 的 profile 置信区间：SSE(d) 抛物线拟合 → 曲率 → 标准误
+    m = len(best_fit.res.fun)
+    n_beta = best_fit.res.x.size
+    n_lin = best_fit.n_lin
+    dof = m - n_beta - n_lin - 1
+    s2 = sse_min / max(dof, 1)
+    # 用最小值附近窗口拟合 SSE(d) = a2·(d−d̂)² + a1·(d−d̂) + a0
+    valid = np.isfinite(sse)
+    valid_idx = np.where(valid)[0]
+    k = int(np.argmin(np.where(valid, sse, np.inf)))
+    lo_k = max(valid_idx.min(), k - 3)
+    hi_k = min(valid_idx.max() + 1, k + 4)
+    dloc = d_grid[lo_k:hi_k]
+    sloc = sse[lo_k:hi_k]
+    dloc = dloc[np.isfinite(sloc)]
+    sloc = sloc[np.isfinite(sloc)]
+    a2 = 0.0
+    if len(dloc) >= 3:
+        c = np.polyfit(dloc, sloc, 2)
+        a2 = float(c[0])          # 二次项系数（>0 时为凹向上抛物线）
+    if a2 > 1e-12:
+        std_d = float(np.sqrt(s2 / a2))
+    else:
+        std_d = float(step)       # 曲率失效时退化为网格步长
+    tval = float(t_dist.ppf(0.975, max(dof, 1)))
+    d_ci = (float(d_opt - tval * std_d), float(d_opt + tval * std_d))
+
+    profile = {
+        "d_grid": d_grid.tolist(), "sse": sse.tolist(),
+        "sse_min": sse_min, "d_opt": float(d_opt),
+        "std_d": std_d, "d_ci": list(d_ci),
+    }
+    return best_fit, profile

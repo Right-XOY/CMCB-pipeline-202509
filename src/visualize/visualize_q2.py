@@ -204,7 +204,7 @@ def fig07_reliability(out_dir: Path, result_dir: Path) -> None:
     ax.set_xlabel("噪声等级 η（%，相对信号 std）")
     ax.set_ylabel("厚度 d（μm）")
     ax.set_title("不同噪声等级下的厚度估计漂移")
-    ax.legend(loc="best")
+    ax.legend(loc="lower right")
     fig.tight_layout()
     fig.savefig(out_dir / "q2_fig07_reliability.png")
     plt.close(fig)
@@ -217,7 +217,7 @@ def fig08_cross_check(out_dir: Path, result_dir: Path) -> None:
         res = json.load(f)
     models = ["cauchy", "sellmeier1"]
     names = ["Cauchy", "Sellmeier"]
-    colors = [C_CAU, C_SEL]
+    colors = ["#1f77b4", "#2ca02c"]   # 蓝、绿
     labels = ["联合拟合", "单角度 10°", "单角度 15°"]
     xs = np.arange(3)
     fig, ax = plt.subplots(figsize=(8.5, 4.8))
@@ -235,7 +235,8 @@ def fig08_cross_check(out_dir: Path, result_dir: Path) -> None:
     ax.set_xticklabels(labels)
     ax.set_ylabel("厚度 d（μm）")
     ax.set_title("双角度交叉验证：单角度独立拟合 vs 联合拟合")
-    ax.legend(loc="best")
+    ax.set_ylim(7.30, 7.85)
+    ax.legend(loc="upper right")
     fig.tight_layout()
     fig.savefig(out_dir / "q2_fig08_cross_check.png")
     plt.close(fig)

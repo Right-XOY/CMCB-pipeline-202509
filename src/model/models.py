@@ -94,6 +94,28 @@ def theory_osc(nu: np.ndarray, d_um: float, n1: np.ndarray, theta0_deg: float,
     return Rosc * 100.0
 
 
+# 双光束干涉完整反射率（含 DC 项，一阶近似，用于与 Airy 同口径对比）
+def two_beam_reflectance(nu, d_um, n1, n2, theta0_deg, n0=1.0):
+    """双光束干涉**完整反射率**（%），含 DC 项。
+
+    与 theory_osc 的差别：theory_osc 已减去 DC 项（只留振荡），本函数保留
+    DC 项，用于问题三中与 Airy 模型在"完整反射率"口径下公平对比（AIC/BIC）。
+    无吸收时 n1、n2 为实数，r01、r12 由菲涅尔公式给出。
+    """
+    nu = np.asarray(nu, float)
+    theta0 = np.deg2rad(theta0_deg)
+    theta1 = np.arcsin(np.minimum(n0 * np.sin(theta0) / n1, 1.0))
+    delta = 4.0 * np.pi * n1 * d_um * np.cos(theta1) * nu / 1e4
+    e = np.exp(1j * delta)
+
+    rs01, rp01 = fresnel_r(n0, n1, theta0)
+    rs12, rp12 = fresnel_r(n1, n2, theta1)
+
+    Rs = np.abs(rs01 + (1 - rs01 ** 2) * rs12 * e) ** 2
+    Rp = np.abs(rp01 + (1 - rp01 ** 2) * rp12 * e) ** 2
+    return (Rs + Rp) / 2.0 * 100.0
+
+
 def theory_R(nu: np.ndarray, d_um: float, beta: np.ndarray, theta0_deg: float,
              n2: float, model: str, n0: float = 1.0) -> np.ndarray:
     """按指定色散模型计算振荡反射率（%）。
@@ -111,3 +133,101 @@ def theory_R(nu: np.ndarray, d_um: float, beta: np.ndarray, theta0_deg: float,
     else:
         raise ValueError(f"未知模型: {model}")
     return theory_osc(nu, d_um, n1, theta0_deg, n2, n0)
+
+
+# 多光束干涉：Airy 公式单层薄膜反射率（s/p 偏振平均，支持复折射率）
+def airy_reflectance(nu, d_um, n1, n2, theta0_deg, n0=1.0):
+    """多光束干涉完整反射率 R = |r|²（%），Airy 公式（单层薄膜精确解）。
+
+    与双光束的"振荡项"不同，本函数返回**完整反射率**（含 DC 项 r01²），
+    因此可直接拟合原始反射率。对单层薄膜，Airy 公式
+        r = (r01 + r12 e^{2iδ}) / (1 + r01 r12 e^{2iδ})
+    就是传输矩阵法（Maxwell 方程精确解）的解析形式，其中 r01、r12 为
+    复菲涅尔系数、δ = 2π ν n1 d cosθ1 为单程复相位，故有吸收（复折射率）
+    时仍精确，不依赖 Stokes 关系。
+
+    参数
+    ----
+    nu         : 波数数组（cm⁻¹）
+    d_um       : 外延层厚度（μm）
+    n1         : 外延层复折射率（标量或数组，随 nu 可变化）
+    n2         : 衬底复折射率（标量或数组）
+    theta0_deg : 入射角（°）
+    n0         : 入射介质折射率（空气，实数）
+
+    返回
+    ----
+    R : 反射率（%），s/p 偏振平均，取值 [0, 100]
+    """
+    nu = np.asarray(nu, float)
+    n1 = np.asarray(n1, complex)
+    n2 = np.asarray(n2, complex)
+    theta0 = np.deg2rad(theta0_deg)
+    cos0 = np.cos(theta0)
+    sin0 = n0 * np.sin(theta0)
+
+    # Snell 定律复推广：n0 sinθ0 = n_j sinθ_j，cosθ_j 取实部非负分支
+    sin1 = sin0 / n1
+    sin2 = sin0 / n2
+    cos1 = np.sqrt(1.0 - sin1 ** 2)
+    cos2 = np.sqrt(1.0 - sin2 ** 2)
+
+    # 单程相位：δ = 2π ν n1 d cosθ1，d[cm] = d_um × 1e-4；往返因子 e^{2iδ}
+    delta = 2.0 * np.pi * nu * n1 * (d_um * 1e-4) * cos1
+    e2 = np.exp(2j * delta)
+
+    def _r_pol(eta0, eta1, eta2):
+        """由光学导纳求 Airy 反射系数 r = (r01 + r12 e^{2iδ})/(1 + r01 r12 e^{2iδ})。"""
+        r01 = (eta0 - eta1) / (eta0 + eta1)
+        r12 = (eta1 - eta2) / (eta1 + eta2)
+        return (r01 + r12 * e2) / (1.0 + r01 * r12 * e2)
+
+    # s 偏振导纳 η = n cosθ；p 偏振导纳 η = n / cosθ
+    rs = _r_pol(n0 * cos0, n1 * cos1, n2 * cos2)
+    rp = _r_pol(n0 / cos0, n1 / cos1, n2 / cos2)
+
+    R = (np.abs(rs) ** 2 + np.abs(rp) ** 2) / 2.0
+    return R * 100.0
+
+
+def airy_reflectance_avg(nu, d_um, sigma_d, n1, n2, theta0_deg, n0=1.0,
+                         n_gh=9):
+    """厚度系综平均的多光束反射率（%），建模光斑内厚度不均匀。
+
+    光斑内厚度 d 近似服从高斯分布 N(d_um, sigma_d²)（表面粗糙/楔角/外延
+    均匀性），实测反射率是不同厚度反射率的系综平均。用 Gauss-Hermite 积分
+    对厚度做平均：
+        R_avg(ν) = (1/√π) Σ w_k · R(ν; d_um + √2·σ_d·x_k)
+    其中 (x_k, w_k) 为 n_gh 点 Gauss-Hermite 节点与权重。
+
+    该平均使干涉条纹对比度随波数近似高斯衰减（远快于吸收的指数衰减）：
+        visibility(ν) ≈ exp[ -(4π n1 σ_d cosθ1 ν / 1e4)² / 2 ]
+    sigma_d=0 时退化为单厚度 Airy 解。
+    """
+    nu = np.asarray(nu, float)
+    if sigma_d <= 0.0:
+        return airy_reflectance(nu, d_um, n1, n2, theta0_deg, n0)
+    x, w = np.polynomial.hermite.hermgauss(n_gh)
+    R = np.zeros_like(nu)
+    for xi, wi in zip(x, w):
+        d_i = d_um + np.sqrt(2.0) * sigma_d * xi
+        R = R + wi * airy_reflectance(nu, d_i, n1, n2, theta0_deg, n0)
+    return R / np.sqrt(np.pi)
+
+
+def two_beam_reflectance_avg(nu, d_um, sigma_d, n1, n2, theta0_deg, n0=1.0,
+                             n_gh=9):
+    """双光束完整反射率在厚度高斯分布下的系综平均（%）。
+
+    与 airy_reflectance_avg 同口径：建模光斑内厚度不均匀 σ_d，使双光束与
+    Airy 在"是否含多光束高阶项"之外保持相同自由度，用于 AIC/BIC 公平对比。
+    """
+    nu = np.asarray(nu, float)
+    if sigma_d <= 0.0:
+        return two_beam_reflectance(nu, d_um, n1, n2, theta0_deg, n0)
+    x, w = np.polynomial.hermite.hermgauss(n_gh)
+    R = np.zeros_like(nu)
+    for xi, wi in zip(x, w):
+        d_i = d_um + np.sqrt(2.0) * sigma_d * xi
+        R = R + wi * two_beam_reflectance(nu, d_i, n1, n2, theta0_deg, n0)
+    return R / np.sqrt(np.pi)

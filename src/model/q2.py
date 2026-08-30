@@ -19,7 +19,7 @@ import yaml
 from preprocess import load_spectra, preprocess
 from fitting import (de_init_beta, fft_init_d, fit_statistics, lm_fit,
                      noise_robustness_test, parameter_uncertainty,
-                     single_angle_cross_check)
+                     profile_scan_d, single_angle_cross_check)
 
 # 物理常量与入射角（题目给定）
 N0 = 1.0              # 空气折射率
@@ -77,30 +77,34 @@ def save_json(path: Path, data: dict) -> None:
     print(f"  [输出] {path.name}")
 
 
-def solve_model(wn1, R1, wn2, R2, d0, model: str, fix_d: bool = True) -> tuple[dict, object]:
-    """对单个模型执行 DE 初值 → L-M 拟合 → 可靠性统计。
+def solve_model(wn1, R1, wn2, R2, d0, model: str,
+                d_half: float = 0.5, step: float = 0.01) -> tuple[dict, object]:
+    """对单个模型执行 DE 初值 → 剖面扫描精调 d → 可靠性统计。
 
     返回 (可序列化摘要 dict, FitResult 拟合对象)。
     线性参数 (a, b) 每个角度独立、闭式消元，不进优化器。
-    fix_d=True：厚度由 FFT 固定（d0），只优化色散系数，避免周期分支跳变。
+    厚度 d 先由 FFT 固定 d0 估计色散初值，再用剖面扫描在 [d0±d_half] 内
+    精调：每个候选 d 固定、仅优化色散系数，取 SSE 最小者，锁在正确分支内。
     """
     # 1) DE 初值（色散系数，厚度固定 d0）
     beta0 = de_init_beta(wn1, R1, wn2, R2, d0, model, N2, ANGLES,
                          DE_BOUNDS[model], seed=SEED)
 
-    # 2) L-M 拟合
-    fit = lm_fit(wn1, R1, wn2, R2, d0, beta0, model, N2, ANGLES,
-                 BOUNDS[model], seed=SEED, fix_d=fix_d)
+    # 2) 剖面扫描精调厚度 d（每个 d 固定，仅优化色散系数）
+    fit, profile = profile_scan_d(wn1, R1, wn2, R2, d0, beta0, model, N2,
+                                  ANGLES, BOUNDS[model], d_half=d_half,
+                                  step=step, seed=SEED)
+    d = fit.d
 
-    # 3) 拟合优度统计（自由度 = 优化变量数 + 线性参数数）
+    # 3) 拟合优度统计（自由度 = 色散系数数 + 线性参数数）
     stats = fit_statistics(fit.res, fit.res.x.size + fit.n_lin, R1, R2)
 
-    # 4) 参数不确定性（协方差 → 置信区间；fix_d 时 d 固定无不确定度）
-    pnames = PARAM_NAMES[model] if not fix_d else PARAM_NAMES[model][1:]
+    # 4) 色散系数不确定性（协方差 → 置信区间）
+    pnames = PARAM_NAMES[model][1:]
     sd, ci, _ = parameter_uncertainty(fit.res, pnames, n_lin=fit.n_lin)
 
     # 5) 双角度一致性交叉验证（独立自由拟合，仅用于检验）
-    cross = single_angle_cross_check(wn1, R1, wn2, R2, d0, beta0, model,
+    cross = single_angle_cross_check(wn1, R1, wn2, R2, d, beta0, model,
                                      N2, ANGLES, BOUNDS[model], seed=SEED)
 
     linear = {f"angle{int(k)}": {"a": v[0], "b": v[1]}
@@ -108,7 +112,13 @@ def solve_model(wn1, R1, wn2, R2, d0, model: str, fix_d: bool = True) -> tuple[d
     summary = {
         "model": model,
         "theta": fit.theta.tolist(),
-        "d": fit.d, "beta": fit.beta.tolist(),
+        "d": d, "d0": d0,
+        "d_ci": profile["d_ci"],
+        "d_std": profile["std_d"],
+        "profile_sse_min": profile["sse_min"],
+        "profile_d_grid": profile["d_grid"],
+        "profile_sse": profile["sse"],
+        "beta": fit.beta.tolist(),
         "linear": linear,
         "param_sd": sd.tolist(),
         "param_ci": ci.tolist(),
@@ -116,8 +126,6 @@ def solve_model(wn1, R1, wn2, R2, d0, model: str, fix_d: bool = True) -> tuple[d
         "stats": stats,
         "cross_check": cross,
         "beta0": beta0.tolist(),
-        "d0": d0,
-        "fix_d": bool(fix_d),
     }
     return summary, fit
 
@@ -157,15 +165,16 @@ def main() -> None:
     print(f"  d0 = {d0:.3f} um")
 
     # 3. 两模型求解
-    print("\n[3] 模型求解（DE 初值 + L-M 联合拟合）")
+    print("\n[3] 模型求解（DE 初值 + 剖面扫描精调 d）")
     results = {}
     for model in ["cauchy", "sellmeier1"]:
         print(f"  --- 模型: {model} ---")
         results[model], fit = solve_model(wn1, R1, wn2, R2, d0, model)
         r = results[model]
         lin = r["linear"]
-        print(f"    d = {r['d']:.4f} um (FFT固定)   RMSE = {r['stats']['RMSE']:.4f}   "
-              f"R^2 = {r['stats']['R2']:.4f}")
+        d_ci = r["d_ci"]
+        print(f"    d = {r['d']:.4f} um  95%CI [{d_ci[0]:.4f}, {d_ci[1]:.4f}]  "
+              f"RMSE = {r['stats']['RMSE']:.4f}   R^2 = {r['stats']['R2']:.4f}")
         print(f"    线性校正 10deg: a={lin['angle10']['a']:.4f} b={lin['angle10']['b']:.4f}  |  "
               f"15deg: a={lin['angle15']['a']:.4f} b={lin['angle15']['b']:.4f}")
         print(f"    单角度独立拟合(自由d): 10deg -> {r['cross_check']['d_angle1']:.4f} um, "
@@ -174,12 +183,12 @@ def main() -> None:
         save_csv(result_dir / f"q2_fit_{model}.csv",
                  "wn1,R_obs1,R_fit1,wn2,R_obs2,R_fit2",
                  [wn1, R1, fit.fit1, wn2, R2, fit.fit2])
-        # 参数表落盘（fix_d 时 d 固定，sd=0、CI=[d,d]）
+        # 参数表落盘：d 用剖面扫描值 + profile CI；色散系数用协方差 sd/ci
         names = PARAM_NAMES[model]
         theta_full = np.concatenate([[r["d"]], np.asarray(r["beta"], float)])
-        sd_full = np.concatenate([[0.0], np.asarray(r["param_sd"], float)])
-        ci_lo = np.concatenate([[r["d"]], np.asarray(r["param_ci"], float)[:, 0]])
-        ci_hi = np.concatenate([[r["d"]], np.asarray(r["param_ci"], float)[:, 1]])
+        sd_full = np.concatenate([[r["d_std"]], np.asarray(r["param_sd"], float)])
+        ci_lo = np.concatenate([[d_ci[0]], np.asarray(r["param_ci"], float)[:, 0]])
+        ci_hi = np.concatenate([[d_ci[1]], np.asarray(r["param_ci"], float)[:, 1]])
         param_csv = np.column_stack([np.array(names, dtype=object),
                                      np.round(theta_full, 6), np.round(sd_full, 6),
                                      np.round(ci_lo, 6), np.round(ci_hi, 6)])
@@ -195,7 +204,8 @@ def main() -> None:
         noise[model] = noise_robustness_test(
             wn1, R1, wn2, R2, model, N2, ANGLES,
             BOUNDS[model], DE_BOUNDS[model],
-            levels=(0.01, 0.02, 0.05), nrep=5, seed=SEED)
+            levels=(0.01, 0.02, 0.03, 0.04, 0.05), nrep=5, seed=SEED,
+            profile_step=0.05, d_half=2.0)
         for eta, v in noise[model].items():
             print(f"  {model} eta={eta}: d = {v['d_mean']:.4f} +/- {v['d_std']:.4f} um")
     save_json(result_dir / "q2_noise_test.json", noise)

@@ -37,7 +37,7 @@ import yaml
 ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT / "src" / "model"))
 from preprocess import load_spectra, resample  # noqa: E402
-from models import (airy_reflectance_avg, airy_reflectance_osc, n_drude,  # noqa: E402
+from optics import (airy_reflectance_avg, airy_reflectance_osc, n_drude,  # noqa: E402
                     n_sellmeier1, theory_osc, two_beam_reflectance_avg)
 
 # matplotlib 全局样式：与 q2 生图脚本保持一致（PNG + 彩色 + 中文）

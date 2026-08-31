@@ -31,7 +31,7 @@ ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT / "src" / "model"))
 from preprocess import find_cutoff_stft, load_spectra, resample  # noqa: E402
 from scipy.stats import norm, probplot  # noqa: E402
-from models import n_cauchy, n_sellmeier1  # noqa: E402
+from optics import n_cauchy, n_sellmeier1  # noqa: E402
 
 # matplotlib 全局样式：PNG + 彩色 + 中文
 plt.rcParams.update({
@@ -336,6 +336,60 @@ def fig11_residual_norm(out_dir: Path, result_dir: Path) -> None:
         print("save -> %s/q2_fig11_residual_qq_%s.png" % (out_dir.name, model))
 
 
+# 图12：参数估计与 95% 置信区间（厚度 d 与色散系数）
+def fig12_parameter_ci(out_dir: Path, result_dir: Path) -> None:
+    with open(result_dir / "q2_results.json", encoding="utf-8") as f:
+        res = json.load(f)
+
+    fig, axes = plt.subplots(2, 1, figsize=(9, 6.5))
+
+    # 上：厚度 d
+    ax = axes[0]
+    d_items = [("cauchy", "Cauchy", C_CAU), ("sellmeier1", "Sellmeier", C_SEL)]
+    for i, (m, name, color) in enumerate(d_items):
+        r = res["models"][m]
+        d, lo, hi = r["d"], r["d_ci"][0], r["d_ci"][1]
+        y = 1 - i
+        ax.errorbar(d, y, xerr=[[d - lo], [hi - d]], fmt="o", color=color,
+                    capsize=6, capthick=1.6, lw=1.6, ms=8)
+        ax.text(d, y - 0.25, f"{d:.4f} [{lo:.4f}, {hi:.4f}]",
+                ha="center", va="top", fontsize=8)
+    ax.set_yticks([1, 0])
+    ax.set_yticklabels([n for _, n, _ in d_items])
+    ax.set_ylim(-0.7, 1.6)
+    ax.set_xlabel("厚度 d（μm）")
+    ax.set_title("厚度 d 估计值与 95% 置信区间")
+
+    # 下：色散系数
+    ax = axes[1]
+    params = []
+    r = res["models"]["cauchy"]
+    for j, pname in enumerate(["A", "B", "C"]):
+        params.append((f"Cauchy·{pname}", r["beta"][j], r["param_ci"][j][0],
+                       r["param_ci"][j][1], C_CAU))
+    r = res["models"]["sellmeier1"]
+    for j, pname in enumerate(["B", "C"]):
+        params.append((f"Sellmeier·{pname}", r["beta"][j], r["param_ci"][j][0],
+                       r["param_ci"][j][1], C_SEL))
+    n = len(params)
+    ys = np.arange(n)[::-1]
+    for (name, val, lo, hi, color), y in zip(params, ys):
+        ax.errorbar(val, y, xerr=[[val - lo], [hi - val]], fmt="o", color=color,
+                    capsize=6, capthick=1.6, lw=1.6, ms=8)
+        ax.text(val, y - 0.22, f"{val:.3f} [{lo:.3f}, {hi:.3f}]",
+                ha="center", va="top", fontsize=8)
+    ax.set_yticks(ys)
+    ax.set_yticklabels([p[0] for p in params])
+    ax.set_ylim(-0.7, n - 0.4)
+    ax.set_xlabel("色散系数值")
+    ax.set_title("色散系数估计值与 95% 置信区间")
+
+    fig.tight_layout()
+    fig.savefig(out_dir / "q2_fig12_parameter_ci.png")
+    plt.close(fig)
+    print("save -> %s/q2_fig12_parameter_ci.png" % out_dir.name)
+
+
 def main() -> None:
     cfg = load_config()
     raw = cfg["data"]["raw_files"]
@@ -366,8 +420,9 @@ def main() -> None:
     fig09_residual_fft(out_dir, result_dir)
     fig10_dispersion(out_dir, result_dir)
     fig11_residual_norm(out_dir, result_dir)
+    fig12_parameter_ci(out_dir, result_dir)
 
-    print("完成。19 张图已输出到 outputs/figures/q2/。")
+    print("完成。20 张图已输出到 outputs/figures/q2/。")
 
 
 if __name__ == "__main__":
